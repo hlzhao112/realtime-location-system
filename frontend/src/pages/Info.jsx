@@ -82,7 +82,7 @@ function Basic({ p, setProject, toast, setModal, goMap }) {
       <div className="row mb12 wrap">
         <button className="btn sm" onClick={() => edit("基本信息", "basic", [["pid", "PID", "mono"], ["name", "项目名称"]])}>基本信息</button>
         <button className="btn sm" onClick={() => edit("采集参数", "collect", [["folder", "监控文件夹", "mono"], ["backup", "备份目录", "mono"], ["scan", "扫描间隔", "num"], ["stable", "稳定等待", "num"], ["offline", "离线判定", "num"], ["batch", "单批上限", "num"]])}>采集参数</button>
-        <button className="btn sm" onClick={() => edit("推送与容错", "push", [["resendMax", "连续补发上限", "num"], ["retry", "重试次数", "num"], ["logClean", "日志清理天", "num"]])}>推送与容错</button>
+        <button className="btn sm" onClick={() => edit("推送与容错", "push", [["resendMax", "连续补发上限", "num"], ["keepSec", "保持推送间隔（秒）", "num"], ["retry", "重试次数", "num"], ["logClean", "日志清理天", "num"]])}>推送与容错</button>
         <button className="btn sm" onClick={() => edit("接口与鉴权", "api", [["appId", "AppID", "mono"], ["appSecret", "AppSecret"], ["tokenUrl", "Token URL", "mono"], ["pushUrl", "推送 URL", "mono"]])}>接口与鉴权</button>
         <button className="btn" onClick={async () => { try { const r = await api.testApi(p.pid); toast(r.detail, "连通测试"); } catch (e) { toast(e.message); } }}>测试接口连通</button>
         {p.ready ? <span className="tag ok">配置完整</span> : <span className="tag err">配置未完成</span>}
@@ -101,7 +101,7 @@ function Basic({ p, setProject, toast, setModal, goMap }) {
       </div>
       <div className="card mb12">
         <div className="sec-h">推送与容错</div>
-        <div className="grid g4">{kv("连续补发上限", c.resendMax)}{kv("接口失败重试次数", c.retry)}{kv("日志自动清理", c.logClean + " 天")}{kv("自动推送", p.push ? "运行中" : "已停止")}</div>
+        <div className="grid g4">{kv("连续补发上限", c.resendMax)}{kv("保持推送间隔", (c.keepSec || 600) + " 秒")}{kv("接口失败重试次数", c.retry)}{kv("日志自动清理", c.logClean + " 天")}{kv("自动推送", p.push ? "运行中" : "已停止")}</div>
       </div>
       <div className="card">
         <div className="sec-h">客户平台接口与鉴权</div>

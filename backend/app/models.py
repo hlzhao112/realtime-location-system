@@ -44,6 +44,7 @@ class Project(Base):
     resend_max: Mapped[int] = mapped_column(Integer, default=10)
     retry: Mapped[int] = mapped_column(Integer, default=3)
     log_clean: Mapped[int] = mapped_column(Integer, default=30)
+    keep_sec: Mapped[int] = mapped_column(Integer, default=600)
     app_id: Mapped[str] = mapped_column(String(128), default="")
     app_secret: Mapped[str] = mapped_column(String(256), default="")
     token_url: Mapped[str] = mapped_column(String(512), default="")

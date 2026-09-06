@@ -27,10 +27,10 @@ export default function App() {
   const [modal, setModal] = useState(null);
   const [user, setUser] = useState("admin");
 
-  const toast = useCallback((msg, k) => {
+  const toast = useCallback((msg, k, ms) => {
     const id = Date.now() + Math.random();
     setToasts((t) => t.concat([{ id, msg, k }]));
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3600);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), ms || 3600);
   }, []);
 
   const loadList = useCallback(async () => {

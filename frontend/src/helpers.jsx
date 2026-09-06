@@ -10,27 +10,51 @@ export const DEFAULT_CFG = {
   resendMax: 10,
   retry: 3,
   logClean: 30,
+  keepSec: 600,
   appId: "",
   appSecret: "",
   tokenUrl: "",
   pushUrl: "",
 };
 export const DEFAULT_FIELDS = [
-  "areaCode",
+  "dataSource",
+  "procedureCode",
   "beamAssetsCode",
   "beamLineCode",
   "identifyTime",
-  "procedureCode",
   "sportState",
+  "areaCode",
+  "projectId",
+  "serverUrl",
+  "dataIndex",
+  "isAutoImported",
 ];
-export const ALL_FIELDS = DEFAULT_FIELDS.concat(["deviceCode", "projectCode"]);
+export const ALL_FIELDS = DEFAULT_FIELDS.slice();
+export const FIELD_TPL_VALUE = {
+  dataSource: "1",
+  procedureCode: '"${procedureCode}"',
+  beamAssetsCode: '"${beamAssetsCode}"',
+  beamLineCode: '"${beamLineCode}"',
+  identifyTime: '"${identifyTime}"',
+  sportState: '"${sportState}"',
+  areaCode: '"${areaCode}"',
+  projectId: '"${projectId}"',
+  serverUrl: '"${serverUrl}"',
+  dataIndex: "0",
+  isAutoImported: "false",
+};
 export const DEFAULT_TPL = `{
-  "areaCode": "\${areaCode}",
+  "dataSource": 1,
+  "procedureCode": "\${procedureCode}",
   "beamAssetsCode": "\${beamAssetsCode}",
   "beamLineCode": "\${beamLineCode}",
   "identifyTime": "\${identifyTime}",
-  "procedureCode": "\${procedureCode}",
-  "sportState": "\${sportState}"
+  "sportState": "\${sportState}",
+  "areaCode": "\${areaCode}",
+  "projectId": "\${projectId}",
+  "serverUrl": "\${serverUrl}",
+  "dataIndex": 0,
+  "isAutoImported": false
 }`;
 
 export function blankProject() {
@@ -94,6 +118,7 @@ export function toSaveBody(p) {
     resendMax: Number(c.resendMax) || 10,
     retry: Number(c.retry) || 3,
     logClean: Number(c.logClean) || 30,
+    keepSec: Number(c.keepSec) || 600,
     appId: c.appId || "",
     appSecret: c.appSecret || "",
     tokenUrl: c.tokenUrl || "",

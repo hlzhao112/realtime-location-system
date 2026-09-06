@@ -7,21 +7,31 @@ from pydantic import BaseModel, Field
 
 
 DEFAULT_FIELDS = [
-    "areaCode",
+    "dataSource",
+    "procedureCode",
     "beamAssetsCode",
     "beamLineCode",
     "identifyTime",
-    "procedureCode",
     "sportState",
+    "areaCode",
+    "projectId",
+    "serverUrl",
+    "dataIndex",
+    "isAutoImported",
 ]
-ALL_FIELDS = DEFAULT_FIELDS + ["deviceCode", "projectCode"]
+ALL_FIELDS = DEFAULT_FIELDS[:]
 DEFAULT_TPL = """{
-  "areaCode": "${areaCode}",
+  "dataSource": 1,
+  "procedureCode": "${procedureCode}",
   "beamAssetsCode": "${beamAssetsCode}",
   "beamLineCode": "${beamLineCode}",
   "identifyTime": "${identifyTime}",
-  "procedureCode": "${procedureCode}",
-  "sportState": "${sportState}"
+  "sportState": "${sportState}",
+  "areaCode": "${areaCode}",
+  "projectId": "${projectId}",
+  "serverUrl": "${serverUrl}",
+  "dataIndex": 0,
+  "isAutoImported": false
 }"""
 
 
@@ -95,6 +105,7 @@ class CfgOut(BaseModel):
     resendMax: int = 10
     retry: int = 3
     logClean: int = 30
+    keepSec: int = 600
     appId: str = ""
     appSecret: str = ""
     tokenUrl: str = ""
@@ -142,6 +153,7 @@ class ProjectSaveIn(BaseModel):
     resendMax: int = 10
     retry: int = 3
     logClean: int = 30
+    keepSec: int = 600
     appId: str = ""
     appSecret: str = ""
     tokenUrl: str = ""

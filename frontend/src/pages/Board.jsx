@@ -1,10 +1,34 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, downloadAuth } from "../api";
-import { countAreas, countProcs } from "../helpers.jsx";
 import { Modal } from "../ui";
 
 function srcKind(r) {
   return r.k || (r.src === "手动" ? "手动编辑" : "实时上报");
+}
+
+function uniqueOptions(rows, key, labelFn) {
+  const seen = new Map();
+  rows.forEach((r) => {
+    const v = r[key];
+    if (v == null || v === "") return;
+    if (!seen.has(v)) seen.set(v, labelFn ? labelFn(r) : String(v));
+  });
+  return Array.from(seen.entries()).sort((a, b) => a[1].localeCompare(b[1], "zh"));
+}
+
+function HeaderFilter({ value, onChange, options, placeholder }) {
+  return (
+    <select
+      className={"input th-filter" + (value ? " on" : "")}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      <option value="">{placeholder}</option>
+      {options.map(([v, label]) => (
+        <option key={v} value={v}>{label}</option>
+      ))}
+    </select>
+  );
 }
 
 function TzCard({ t, list, onDragStart }) {
@@ -34,6 +58,7 @@ function TzCard({ t, list, onDragStart }) {
         {t.test ? <> · <span className="mk">测试</span></> : null}
         {list ? ` · ${t.reader}` : ""}
       </div>
+      {list ? <div className="last">最近上报 {t.last || "—"}</div> : null}
     </div>
   );
 }
@@ -43,7 +68,11 @@ export default function Board({ project, toast, startWizard }) {
   const [recs, setRecs] = useState([]);
   const [qRec, setQRec] = useState("");
   const [merge, setMerge] = useState(false);
+  const [colF, setColF] = useState({ tz: "", line: "", area: "", pc: "" });
   const [modal, setModal] = useState(null);
+  const [pushingId, setPushingId] = useState(null);
+  const linesRef = useRef(null);
+  const [linesH, setLinesH] = useState(null);
   const pid = project.pid;
 
   const load = useCallback(async () => {
@@ -59,6 +88,7 @@ export default function Board({ project, toast, startWizard }) {
   }, [load, toast]);
 
   const trolleys = board?.trolleys || [];
+  const lines = project.lines || [];
   const test = board?.test || { on: false, fast: true, tick: 0, made: 0, recs: 0 };
   const stats = board?.stats || { lines: 0, procs: 0, areas: 0, online: 0, stale: 0, total: 0 };
   const offlineMin = board?.offlineMin || Math.round((project.cfg?.offline || 0.5) * 60);
@@ -72,6 +102,28 @@ export default function Board({ project, toast, startWizard }) {
     return map;
   }, [trolleys, project.lines]);
 
+  useEffect(() => {
+    const el = linesRef.current;
+    if (!el) return undefined;
+    const sync = () => setLinesH(el.offsetHeight);
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [lines.length, trolleys.length, test.on, test.made, test.recs]);
+
+  const shownRecs = useMemo(() => recs.filter((r) => (
+    (!colF.tz || r.tz === colF.tz)
+    && (!colF.line || r.line === colF.line)
+    && (!colF.area || r.area === colF.area)
+    && (!colF.pc || r.pc === colF.pc)
+  )), [recs, colF]);
+
+  const tzOpts = useMemo(() => uniqueOptions(recs, "tz", (r) => `${r.tz} ${r.seat || ""}`.trim()), [recs]);
+  const lineOpts = useMemo(() => uniqueOptions(recs, "line"), [recs]);
+  const areaOpts = useMemo(() => uniqueOptions(recs, "area"), [recs]);
+  const pcOpts = useMemo(() => uniqueOptions(recs, "pc", (r) => `${r.pn || ""} ${r.pc || ""}`.trim()), [recs]);
+
   async function run(fn, okMsg, okK) {
     try {
       await fn();
@@ -79,6 +131,27 @@ export default function Board({ project, toast, startWizard }) {
       if (okMsg) toast(okMsg, okK);
     } catch (e) {
       toast(e.message);
+    }
+  }
+
+  function replyText(res) {
+    const parts = [];
+    if (res?.code != null && res.code !== "") parts.push(`code: ${res.code}`);
+    if (res?.msg != null && String(res.msg).trim() !== "") parts.push(`msg: ${res.msg}`);
+    return parts.join("  ") || (res?.ok ? "客户接口已接收" : "未返回 code / msg");
+  }
+
+  async function pushRow(r) {
+    if (pushingId != null) return;
+    setPushingId(r.id);
+    try {
+      const res = await api.pushOne(pid, r.id);
+      await load();
+      toast(replyText(res), res.ok ? "推送成功" : "推送失败", 6000);
+    } catch (e) {
+      toast(e.message, "推送失败", 6000);
+    } finally {
+      setPushingId(null);
     }
   }
 
@@ -190,8 +263,6 @@ export default function Board({ project, toast, startWizard }) {
     );
   }
 
-  const lines = project.lines || [];
-
   return (
     <div>
       <div className="kicker">模块 E · 项目内部</div>
@@ -237,7 +308,7 @@ export default function Board({ project, toast, startWizard }) {
         </>
       ) : (
         <div className="board">
-          <div className="lines">
+          <div className="lines" ref={linesRef}>
             {lines.map((l) => {
               const list = byLine[l.id] || [];
               const un = list.filter((t) => t.unassigned);
@@ -269,25 +340,24 @@ export default function Board({ project, toast, startWizard }) {
               );
             })}
           </div>
-          <div>
-            <div className="side-box">
-              <h4>产线工序统计</h4>
-              <div className="mini"><span>生产线</span><b>{stats.lines} 条</b></div>
-              <div className="mini"><span>工序分区</span><b>{stats.procs || countProcs(project)} 个</b></div>
-              <div className="mini"><span>区域</span><b>{stats.areas || countAreas(project)} 个</b></div>
-              <div className="mini"><span>推送模板</span><b style={{ color: "var(--brand)" }}>{project.tpl?.custom ? "自定义" : "默认模板"}</b></div>
+          <aside className="board-side" style={linesH ? { "--lines-h": `${linesH}px` } : undefined}>
+            <h4>台车列表 <span className="hint">· 可拖拽定位</span></h4>
+            <div className="tz-stats">
+              <div className="tz-stat">
+                <div className="n">{stats.total}</div>
+                <div className="l">总台车</div>
+              </div>
+              <div className="tz-stat">
+                <div className="n" style={{ color: "var(--ok)" }}>{stats.online}</div>
+                <div className="l">在线</div>
+              </div>
+              <div className="tz-stat">
+                <div className="n" style={{ color: "var(--warn)" }}>{stats.stale}</div>
+                <div className="l">停留超时</div>
+              </div>
             </div>
-            <div className="side-box">
-              <h4>台车实时状态</h4>
-              <div className="mini"><span>在线</span><b style={{ color: "var(--brand)" }}>{stats.online}</b></div>
-              <div className="mini"><span>停留超时</span><b style={{ color: "var(--t3)" }}>{stats.stale}</b></div>
-              <div className="mini"><span>总台车</span><b>{stats.total}</b></div>
-            </div>
-            <div className="side-box">
-              <h4>全部台车一览 <span style={{ fontSize: 11, color: "var(--t3)", fontWeight: 400 }}>· 可拖拽定位</span></h4>
-              <div className="tz-list">{trolleys.map((t) => <TzCard key={t.tz} t={t} list />)}</div>
-            </div>
-          </div>
+            <div className="tz-list">{trolleys.map((t) => <TzCard key={t.tz} t={t} list />)}</div>
+          </aside>
         </div>
       )}
 
@@ -302,15 +372,27 @@ export default function Board({ project, toast, startWizard }) {
         <button className="btn sm" onClick={() => downloadAuth(api.exportPushesUrl(pid, qRec, merge), `${pid}-push-records.xlsx`).then(() => toast("已导出当前筛选结果 push-records.xlsx")).catch((e) => toast(e.message))}>⤒ 导出 Excel</button>
       </div>
       <div className="card pad0">
-        <div className="tb-wrap" style={{ maxHeight: 420 }}>
+        <div className="tb-wrap" style={{ maxHeight: 840 }}>
           <table className="tb">
             <thead>
               <tr>
                 <th className="num">序号</th>
-                <th>识别工序</th>
-                <th>关联台座</th>
-                <th>关联生产线</th>
-                <th>区域</th>
+                <th className="filterable">
+                  识别工序
+                  <HeaderFilter value={colF.pc} onChange={(v) => setColF((f) => ({ ...f, pc: v }))} options={pcOpts} placeholder="全部工序" />
+                </th>
+                <th className="filterable">
+                  台车
+                  <HeaderFilter value={colF.tz} onChange={(v) => setColF((f) => ({ ...f, tz: v }))} options={tzOpts} placeholder="全部台车" />
+                </th>
+                <th className="filterable">
+                  产品线
+                  <HeaderFilter value={colF.line} onChange={(v) => setColF((f) => ({ ...f, line: v }))} options={lineOpts} placeholder="全部产品线" />
+                </th>
+                <th className="filterable">
+                  区域
+                  <HeaderFilter value={colF.area} onChange={(v) => setColF((f) => ({ ...f, area: v }))} options={areaOpts} placeholder="全部区域" />
+                </th>
                 <th>状态</th>
                 <th>识别时间</th>
                 <th>数据来源</th>
@@ -318,7 +400,7 @@ export default function Board({ project, toast, startWizard }) {
               </tr>
             </thead>
             <tbody>
-              {recs.map((r) => (
+              {shownRecs.map((r) => (
                 <tr key={r.id}>
                   <td className="num">{r.no}</td>
                   <td>{r.pn} <span className="mono" style={{ color: "var(--t3)" }}>{r.pc}</span></td>
@@ -337,14 +419,16 @@ export default function Board({ project, toast, startWizard }) {
                     <div className="acts">
                       <button className="btn sm" onClick={() => viewPayload(r.id)}>查看报文</button>
                       <button className="btn sm" onClick={() => editRec(r)}>修改</button>
-                      <button className="btn sm" onClick={() => run(() => api.pushOne(pid, r.id), `已对序号 ${r.id} 执行单条 P2 推送`, "推送")}>推送</button>
+                      <button className="btn sm" disabled={pushingId != null} onClick={() => pushRow(r)}>
+                        {pushingId === r.id ? "推送中…" : "推送"}
+                      </button>
                     </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
-          {!recs.length ? <div className="empty">无匹配推送记录。</div> : null}
+          {!shownRecs.length ? <div className="empty">无匹配推送记录。</div> : null}
         </div>
       </div>
       {modal}

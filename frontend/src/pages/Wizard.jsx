@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { api, downloadAuth } from "../api";
-import { ALL_FIELDS, countAreas, countEpcs, countNos, countProcs, step1Done, step2Done, toSaveBody } from "../helpers.jsx";
+import { ALL_FIELDS, DEFAULT_FIELDS, DEFAULT_TPL, FIELD_TPL_VALUE, countAreas, countEpcs, countNos, countProcs, step1Done, step2Done, toSaveBody } from "../helpers.jsx";
 import { Field, Modal } from "../ui";
 
 function fset(draft, setDraft, key, val) {
@@ -153,6 +153,9 @@ function Step1({ draft, setDraft }) {
         <div className="fh"><span className="t">推送与容错</span></div>
         <div className="fb">
           <Field label="连续补发上限"><input className="input" type="number" value={c.resendMax} onChange={(e) => set("resendMax", e.target.value)} /></Field>
+          <Field label="保持推送间隔（秒）" hint="设备位置不变、无新上报时，复制上一条记录仅更新识别时间，按此间隔持续推送给客户。默认 600 秒（10 分钟）。测试模式仍用演示节奏。">
+            <input className="input" type="number" min="1" value={c.keepSec ?? 600} onChange={(e) => set("keepSec", e.target.value)} />
+          </Field>
           <Field label="接口失败重试次数"><input className="input" type="number" value={c.retry} onChange={(e) => set("retry", e.target.value)} /></Field>
           <Field label="日志自动清理（天）"><input className="input" type="number" value={c.logClean} onChange={(e) => set("logClean", e.target.value)} /></Field>
         </div>
@@ -358,11 +361,12 @@ function Step3({ draft, setDraft, toast }) {
   }
   function gen() {
     if (!t.fields.length) return toast("请先勾选字段");
-    setDraft({ ...draft, tpl: { ...t, json: "{\n" + t.fields.map((k) => `  "${k}": "\${${k}}"`).join(",\n") + "\n}", custom: true } });
+    const json = "{\n" + t.fields.map((k) => `  "${k}": ${FIELD_TPL_VALUE[k] || `"\${${k}}"`}`).join(",\n") + "\n}";
+    setDraft({ ...draft, tpl: { ...t, json, custom: true } });
   }
   return (
     <>
-      <div className="alert">绝大多数项目直接跳过本步。仅当客户接口有特殊要求时修改。</div>
+      <div className="alert">绝大多数项目直接跳过本步。仅当客户接口有特殊要求时修改。默认报文与旧系统客户接口一致（含 dataSource / serverUrl 等字段）。</div>
       <div className="fieldset">
         <div className="fh"><span className="t">字段勾选</span></div>
         <div className="fb c1">
@@ -376,7 +380,7 @@ function Step3({ draft, setDraft, toast }) {
           </div>
           <div className="row wrap">
             <button className="btn sm" onClick={gen}>生成模板</button>
-            <button className="btn sm" onClick={() => setDraft({ ...draft, tpl: { fields: ["areaCode", "beamAssetsCode", "beamLineCode", "identifyTime", "procedureCode", "sportState"], json: draft.tpl.json, custom: false } })}>恢复默认</button>
+            <button className="btn sm" onClick={() => setDraft({ ...draft, tpl: { fields: DEFAULT_FIELDS.slice(), json: DEFAULT_TPL, custom: false } })}>恢复默认</button>
           </div>
         </div>
       </div>

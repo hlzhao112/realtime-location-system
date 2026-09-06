@@ -127,6 +127,7 @@ def to_out(db: Session, p: Project, ingest_once: str | None = None) -> ProjectOu
         resendMax=p.resend_max,
         retry=p.retry,
         logClean=p.log_clean,
+        keepSec=int(p.keep_sec or 600),
         appId=p.app_id,
         appSecret="••••••••" if p.app_secret else "",
         tokenUrl=p.token_url,
@@ -224,6 +225,10 @@ def apply_save(db: Session, p: Project, data) -> None:
     p.resend_max = data.resendMax
     p.retry = data.retry
     p.log_clean = data.logClean
+    p.keep_sec = max(int(getattr(data, "keepSec", None) or p.keep_sec or 600), 1)
+    if not p.test_on:
+        from datetime import datetime, timedelta, timezone
+        p.keep_next = datetime.now(timezone.utc) + timedelta(seconds=p.keep_sec)
     p.app_id = data.appId
     if data.appSecret and not data.appSecret.startswith("•"):
         p.app_secret = data.appSecret

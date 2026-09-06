@@ -125,6 +125,7 @@ def copy_project(pid: str, body: CopyIn, db: Session = Depends(get_db)):
         resend_max=src.resend_max,
         retry=src.retry,
         log_clean=src.log_clean,
+        keep_sec=src.keep_sec or 600,
         app_id="",
         app_secret="",
         token_url=src.token_url,
@@ -172,6 +173,7 @@ def patch_cfg(pid: str, body: CfgPatchIn, db: Session = Depends(get_db)):
         "resendMax": "resend_max",
         "retry": "retry",
         "logClean": "log_clean",
+        "keepSec": "keep_sec",
         "appId": "app_id",
         "appSecret": "app_secret",
         "tokenUrl": "token_url",
@@ -186,10 +188,18 @@ def patch_cfg(pid: str, body: CfgPatchIn, db: Session = Depends(get_db)):
         attr = mapping.get(k)
         if not attr:
             continue
+        if k == "keepSec":
+            try:
+                v = max(int(float(v or 600)), 1)
+            except (TypeError, ValueError):
+                v = 600
         setattr(p, attr, v)
         n += 1
         if k == "name":
             p.name = str(v)
+        if k == "keepSec" and not p.test_on:
+            from datetime import datetime, timedelta, timezone
+            p.keep_next = datetime.now(timezone.utc) + timedelta(seconds=int(v))
     write_log(db, p.id, "信息", f"项目信息单项编辑：{body.group} 更新 {n} 个字段")
     return to_out(db, load_project(db, pid))
 
@@ -225,22 +235,14 @@ def reset_token(pid: str, db: Session = Depends(get_db)):
 @router.post("/{pid}/test-api")
 def test_api(pid: str, db: Session = Depends(get_db)):
     p = _must(db, pid)
-    if not p.token_url and not p.push_url:
-        raise HTTPException(400, "请先填写 Token / 推送接口 URL")
-    import httpx
+    if not p.token_url or not p.app_id or not p.app_secret:
+        raise HTTPException(400, "请先填写 AppID、AppSecret 和 Token URL")
+    from ..engine.customer import get_customer_token
 
-    results = []
-    for label, url in (("Token 接口", p.token_url), ("推送接口", p.push_url)):
-        if not url:
-            results.append(f"{label} 未配置")
-            continue
-        try:
-            with httpx.Client(timeout=5.0) as client:
-                r = client.get(url)
-            results.append(f"{label} {r.status_code}")
-        except Exception as e:
-            results.append(f"{label} 失败：{e}")
-    return {"ok": True, "detail": " · ".join(results)}
+    token, error = get_customer_token(p, force_refresh=True)
+    if not token:
+        raise HTTPException(400, f"Token连接失败：{error}")
+    return {"ok": True, "detail": "报文模板有效，Token 连接成功（未产生业务推送）"}
 
 
 @router.patch("/{pid}/lines/{code}", response_model=ProjectOut)

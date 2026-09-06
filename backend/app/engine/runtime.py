@@ -7,12 +7,11 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .customer import build_customer_payload, movement_status, post_customer, replace_identify_time, replace_sport_state
 from ..models import LatestLocation, Line, Project, PushRecord, RawReport, SysLog, Trolley
-from ..schemas import DEFAULT_FIELDS
 from ..services.normalize import norm_epc, pretty_epc
 from ..services.project_svc import load_project, write_log
 
@@ -65,7 +64,16 @@ def adv_sec(p: Project) -> int:
 def keep_sec(p: Project) -> int:
     if p.test_on:
         return 3 if p.test_fast else 60
-    return 600
+    return max(int(getattr(p, "keep_sec", None) or 600), 1)
+
+
+def format_keep_interval(seconds: int) -> str:
+    seconds = max(int(seconds or 0), 1)
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600} 小时"
+    if seconds % 60 == 0:
+        return f"{seconds // 60} 分钟"
+    return f"{seconds} 秒"
 
 
 def adv_label(p: Project) -> str:
@@ -75,7 +83,7 @@ def adv_label(p: Project) -> str:
 def keep_label(p: Project) -> str:
     if p.test_on:
         return "3 秒（演示加速，对应现场 1 分钟）" if p.test_fast else "1 分钟"
-    return "10 分钟"
+    return format_keep_interval(keep_sec(p))
 
 
 def offline_minutes(p: Project) -> float:
@@ -136,13 +144,11 @@ def loc_of(db: Session, project: Project, trolley: Trolley) -> LatestLocation:
     return loc
 
 
-def last_push(db: Session, project_id: int, tz: str) -> Optional[PushRecord]:
-    return db.scalar(
-        select(PushRecord)
-        .where(PushRecord.project_id == project_id, PushRecord.trolley_tz == tz)
-        .order_by(PushRecord.id.desc())
-        .limit(1)
-    )
+def last_push(db: Session, project_id: int, tz: str, test: Optional[bool] = None) -> Optional[PushRecord]:
+    stmt = select(PushRecord).where(PushRecord.project_id == project_id, PushRecord.trolley_tz == tz)
+    if test is not None:
+        stmt = stmt.where(PushRecord.test.is_(test))
+    return db.scalar(stmt.order_by(PushRecord.id.desc()).limit(1))
 
 
 def area_epc(area) -> str:
@@ -154,21 +160,10 @@ def area_epc(area) -> str:
 
 
 def build_payload(project: Project, trolley: Trolley, loc_like, identify_time: datetime, sport_state: str) -> dict:
-    mapping = {
-        "areaCode": getattr(loc_like, "area_code", "") or "",
-        "beamAssetsCode": trolley.tz,
-        "beamLineCode": getattr(loc_like, "line_code", "") or "",
-        "identifyTime": fmt_local(identify_time),
-        "procedureCode": getattr(loc_like, "proc_code", "") or "",
-        "sportState": sport_code(sport_state),
-        "deviceCode": trolley.reader or "",
-        "projectCode": project.pid,
-    }
-    fields = project.tpl_fields or DEFAULT_FIELDS
-    return {k: mapping.get(k, "") for k in fields}
+    return build_customer_payload(project, trolley, loc_like, identify_time, sport_state=sport_state)
 
 
-def deliver(db: Session, project: Project, rec: PushRecord, force: bool = False) -> bool:
+def deliver(db: Session, project: Project, rec: PushRecord, force: bool = False) -> tuple[bool, dict]:
     auto = rec.source != "manual"
     if rec.test:
         rec.status = "success"
@@ -178,7 +173,7 @@ def deliver(db: Session, project: Project, rec: PushRecord, force: bool = False)
             "信息",
             f"台车 {rec.trolley_tz} 测试记录已生成本地（来源:auto·{rec.kind}·测试，默认不外发客户接口）",
         )
-        return True
+        return True, {"code": None, "msg": "测试记录已生成本地，未外发客户接口"}
     if auto and not project.push_enabled and not force:
         rec.status = "pending"
         write_log(
@@ -187,29 +182,32 @@ def deliver(db: Session, project: Project, rec: PushRecord, force: bool = False)
             "信息",
             f"台车 {rec.trolley_tz} 识别到 {rec.proc_name}·{rec.area_code}，自动推送已停止，仅生成记录待补推（来源:{rec.kind}）",
         )
-        return False
+        return False, {"code": None, "msg": "自动推送已停止，仅生成记录待补推"}
     if not project.push_url:
         rec.status = "success"
         write_log(db, project.id, "成功", f"台车 {rec.trolley_tz} 推送成功（本地记成功，未配置客户推送 URL，来源:{rec.kind}）")
-        return True
-    retries = max(int(project.retry or 0), 0)
-    last_err = ""
-    for i in range(retries + 1):
-        try:
-            httpx.post(project.push_url, json=rec.payload, timeout=8.0).raise_for_status()
-            rec.status = "success"
-            write_log(db, project.id, "成功", f"台车 {rec.trolley_tz} 推送成功（来源:{rec.kind}）")
-            return True
-        except Exception as exc:  # noqa: BLE001
-            last_err = str(exc)
+        return True, {"code": None, "msg": "未配置客户推送 URL，仅本地记成功"}
+    if not project.token_url or not project.app_id or not project.app_secret:
+        rec.status = "failed"
+        write_log(db, project.id, "失败", f"台车 {rec.trolley_tz} 推送失败：Token配置不完整（需 AppID、AppSecret、Token URL）")
+        return False, {"code": None, "msg": "Token配置不完整（需 AppID、AppSecret、Token URL）"}
+    ok, result = post_customer(project, rec.payload or {})
+    attempts = max(1, int(project.retry or 3))
+    detail = result.get("msg") or "接口超时"
+    if result.get("code") is not None:
+        detail = f"code={result.get('code')} msg={detail}"
+    if ok:
+        rec.status = "success"
+        write_log(db, project.id, "成功", f"台车 {rec.trolley_tz} 推送成功（来源:{rec.kind}，{detail}）")
+        return True, result
     rec.status = "failed"
     write_log(
         db,
         project.id,
         "失败",
-        f"台车 {rec.trolley_tz} 推送失败：{last_err or '接口超时'}，已重试 {retries}/{retries or 1}",
+        f"台车 {rec.trolley_tz} 推送失败（已重试{attempts}次）: {detail}",
     )
-    return False
+    return False, result
 
 
 def create_push(
@@ -574,30 +572,40 @@ def keep_tick(db: Session, project: Project, test: bool) -> None:
         loc = loc_of(db, project, t)
         if loc.unassigned or not loc.area_code:
             continue
-        last = last_push(db, project.id, t.tz)
+        last = last_push(db, project.id, t.tz, test=bool(test))
         if not last:
             continue
-        loc.identify_time = now
-        loc.kind = "保持推送"
-        loc.source = "auto"
-        create_push(
-            db,
-            project,
-            t,
-            loc,
-            "保持推送",
-            "auto",
-            bool(test),
-            last.sport_state or "still",
-            now,
+        state_cn = movement_status(loc.identify_time)
+        rec = PushRecord(
+            project_id=project.id,
+            trolley_tz=last.trolley_tz,
+            seat_name=last.seat_name,
+            line_code=last.line_code,
+            proc_code=last.proc_code,
+            proc_name=last.proc_name,
+            area_code=last.area_code,
+            area_name=last.area_name or "",
+            sport_state=sport_db(state_cn),
+            source="auto",
+            kind="保持推送",
+            test=bool(test),
+            payload=replace_sport_state(replace_identify_time(last.payload, now), state_cn),
+            status="pending",
+            identify_time=now,
+            ref_id=last.id,
         )
+        db.add(rec)
+        db.flush()
+        if test:
+            project.test_made = int(project.test_made or 0) + 1
+        deliver(db, project, rec, force=False)
         n += 1
     if n:
         write_log(
             db,
             project.id,
             "成功",
-            f"定时保持推送：位置未变，复制上一条记录、仅更新识别时间续推 {n} 条（间隔 {keep_label(project)}）",
+            f"定时保持推送：位置未变，复制上一条记录、更新识别时间与运动状态续推 {n} 条（间隔 {keep_label(project)}）",
         )
 
 
@@ -677,8 +685,50 @@ def push_one(db: Session, project: Project, rec_id: int) -> dict:
     rec = db.get(PushRecord, rec_id)
     if not rec or rec.project_id != project.id:
         raise ValueError("推送记录不存在")
-    ok = deliver(db, project, rec, force=True)
-    return {"ok": ok, "status": rec.status}
+    trolley = next((x for x in project.trolleys if x.tz == rec.trolley_tz), None)
+    if not trolley:
+        raise ValueError("台车不存在")
+    loc = loc_of(db, project, trolley)
+    now = now_utc()
+    if rec.source == "manual":
+        state_cn = sport_cn(rec.sport_state)
+    else:
+        state_cn = movement_status(loc.identify_time or rec.identify_time)
+    newest = PushRecord(
+        project_id=project.id,
+        trolley_tz=rec.trolley_tz,
+        seat_name=rec.seat_name,
+        line_code=rec.line_code,
+        proc_code=rec.proc_code,
+        proc_name=rec.proc_name,
+        area_code=rec.area_code,
+        area_name=rec.area_name or "",
+        sport_state=sport_db(state_cn),
+        source="manual",
+        kind="手动推送",
+        test=bool(rec.test),
+        ref_id=rec.id,
+        payload=build_payload(project, trolley, rec, now, state_cn),
+        status="pending",
+        identify_time=now,
+    )
+    db.add(newest)
+    db.flush()
+    ok, result = deliver(db, project, newest, force=True)
+    write_log(
+        db,
+        project.id,
+        "成功" if ok else "失败",
+        f"手动推送记录 {rec.id}：新增序号 {newest.id}（{state_cn}）",
+    )
+    return {
+        "ok": ok,
+        "id": newest.id,
+        "status": newest.status,
+        "code": result.get("code"),
+        "msg": result.get("msg") or "",
+        "httpStatus": result.get("httpStatus"),
+    }
 
 
 def batch_push(db: Session, project: Project) -> dict:
@@ -694,7 +744,8 @@ def batch_push(db: Session, project: Project) -> dict:
     )
     ok = 0
     for rec in rows:
-        if deliver(db, project, rec, force=True):
+        success, _ = deliver(db, project, rec, force=True)
+        if success:
             ok += 1
     write_log(db, project.id, "成功" if ok == len(rows) else "信息", f"批量推送完成，成功 {ok}/{len(rows)} 台，来源:manual")
     return {"ok": True, "success": ok, "total": len(rows)}

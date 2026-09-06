@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from ..models import LatestLocation, Project, RawReport
 from ..services.cache import get_cache, lookup_epc, lookup_reader
 from ..services.normalize import norm_epc, pretty_epc
+from .customer import movement_status
 from .hooks import ParseContext, after_location_updated, after_parse
 
 
@@ -65,13 +66,8 @@ def apply_report(
     if not hit:
         return {"ok": False, "reason": "unknown_epc", "deviceId": device_id, "tz": trolley.tz}
 
-    state = sport_state or "still"
-    if state not in {"moving", "still", "运动", "静止"}:
-        state = "still"
-    if state == "运动":
-        state = "moving"
-    if state == "静止":
-        state = "still"
+    cn = movement_status(when)
+    state = "moving" if cn == "运动" else "still"
 
     ctx = after_parse(
         ParseContext(

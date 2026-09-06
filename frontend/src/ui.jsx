@@ -4,7 +4,7 @@ export function ToastHost({ toasts }) {
   return (
     <div id="toasts">
       {toasts.map((t) => (
-        <div className="toast" key={t.id}>
+        <div className={"toast" + (t.k === "推送失败" ? " err" : t.k === "推送成功" ? " ok" : "")} key={t.id}>
           {t.k ? <span className="k">{t.k}</span> : null}
           {t.msg}
         </div>

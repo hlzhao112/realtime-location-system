@@ -48,6 +48,18 @@ export default function App() {
     loadList().catch((e) => toast(e.message));
   }, [authed, loadList, toast]);
 
+  // #region agent log
+  useEffect(() => {
+    const snap = (message) => {
+      const mid = document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+      fetch("http://127.0.0.1:7259/ingest/42287c2f-2aca-4b5e-a241-93e737ef8f41", { method: "POST", headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "537a1e" }, body: JSON.stringify({ sessionId: "537a1e", runId: "post-fix", hypothesisId: "A,D", location: "App.jsx:heartbeat", message, data: { authed, view, overlays: document.querySelectorAll(".overlay.on,#login").length, pointerLock: !!document.pointerLockElement, midCursor: mid ? getComputedStyle(mid).cursor : "", midTag: mid ? mid.tagName + "." + (mid.className || "") : "", bodyCursor: getComputedStyle(document.body).cursor }, timestamp: Date.now() }) }).catch(() => {});
+    };
+    snap("app-mount");
+    const t = setInterval(() => snap("app-heartbeat"), 3000);
+    return () => clearInterval(t);
+  }, [authed, view]);
+  // #endregion
+
   function startWizard(mode, src, step) {
     const draft = mode === "new" ? blankProject() : fromApi(JSON.parse(JSON.stringify(src)));
     if (mode === "edit") {
@@ -191,15 +203,20 @@ export default function App() {
                         );
                       }}>复制</button>
                       <button className="btn sm danger" onClick={() => {
+                        const pidToDelete = String(p.pid || "").trim();
                         setModal(
                           <Modal title={"删除项目 · " + p.name} onClose={() => setModal(null)}
                             foot={<><button className="btn" onClick={() => setModal(null)}>取消</button>
                               <button className="btn danger" onClick={async () => {
-                                if (document.getElementById("delPid").value.trim() !== p.pid) return toast("PID 不匹配，未删除");
-                                try { await api.deleteProject(p.pid); setModal(null); loadList(); toast("项目已删除", "删除"); } catch (e) { toast(e.message); }
+                                try {
+                                  await api.deleteProject(pidToDelete);
+                                  setModal(null);
+                                  loadList();
+                                  toast("项目已删除", "删除");
+                                } catch (e) { toast(e.message); }
                               }}>确认删除</button></>}>
                             <div className="alert err">删除后不可恢复，映射与运行数据一并删除。</div>
-                            <div className="field"><label>请输入 PID {p.pid} 以确认</label><input className="input" id="delPid" /></div>
+                            <div className="mini-note">将删除项目 PID：<span className="mono">{pidToDelete}</span></div>
                           </Modal>
                         );
                       }}>删除</button>

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from ..models import Area, Epc, Line, Procedure, Project, TagNo, Trolley
-from .normalize import norm_epc
+from .normalize import norm_epc, norm_reader_id
 
 try:
     import redis
@@ -120,7 +120,12 @@ def lookup_epc(cache: dict, epc: str) -> Hit | None:
 
 
 def lookup_reader(cache: dict, device_id: str) -> TrolleyHit | None:
-    item = cache.get("reader", {}).get(device_id)
+    readers = cache.get("reader", {})
+    item = readers.get(device_id)
+    if not item:
+        alt = norm_reader_id(device_id)
+        if alt and alt != device_id:
+            item = readers.get(alt)
     if not item:
         return None
     return TrolleyHit(**item)

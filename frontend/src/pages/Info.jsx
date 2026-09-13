@@ -178,7 +178,7 @@ function Mapping({ p, setProject, toast, q, setQ, mapTab, setMapTab, setModal, s
       const s = (l.id + l.name + g.code + g.name + a.id + a.name).toLowerCase();
       if (qq && !s.includes(qq)) return;
       rows.push(
-        <tr key={l.id + g.code + a.id}>
+        <tr key={l.id + g.code + g.name + a.id + rows.length}>
           <td className="mono">{l.id}</td>
           <td>{l.name} <span className="pen" onClick={() => editLine(l)}>✎</span></td>
           <td className="mono">{g.code}</td>
@@ -267,7 +267,7 @@ function Mapping({ p, setProject, toast, q, setQ, mapTab, setMapTab, setModal, s
             <div className="row wrap" style={{ marginBottom: 9 }} key={l.id}>
               <span className="note" style={{ minWidth: 118 }}>{l.name} <span className="pen" onClick={() => editLine(l)}>✎</span></span>
               {l.procs.map((g, i) => (
-                <span key={g.code}>
+                <span key={l.id + g.code + g.name + i}>
                   <span className="ordchip">
                     <b>{i + 1}</b> {g.name} <span className="mono">{g.code}</span>
                     <button className="btn sm" onClick={() => editProc(l, g)}>✎</button>

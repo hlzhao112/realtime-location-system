@@ -50,8 +50,10 @@ def _runtime_loop():
             db = SessionLocal()
             try:
                 with LOCK:
-                    tick_all(db)
-                    db.commit()
+                    if tick_all(db):
+                        db.commit()
+                    else:
+                        db.rollback()
             except Exception:
                 db.rollback()
             finally:

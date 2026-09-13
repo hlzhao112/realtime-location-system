@@ -67,17 +67,55 @@ def place(pid: str, tz: str, body: PlaceIn, db: Session = Depends(get_db), _user
     return _locked(db, lambda: rt.place_trolley(db, p, tz, body.lineCode, body.procCode, body.areaCode))
 
 
+def _push_filters(
+    startTime: str = "",
+    endTime: str = "",
+) -> tuple:
+    try:
+        start = rt.parse_query_dt(startTime)
+        end = rt.parse_query_dt(endTime, end=True)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if start and end and end < start:
+        raise HTTPException(400, "结束时间不能小于开始时间")
+    return start, end
+
+
 @router.get("/{pid}/pushes")
 def list_pushes(
     pid: str,
     q: str = "",
     merge: bool = False,
+    page: int = 1,
+    pageSize: int = 200,
+    startTime: str = "",
+    endTime: str = "",
+    tz: str = "",
+    line: str = "",
+    area: str = "",
+    pc: str = "",
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
     p = _must(db, pid)
-    rows = rt.list_pushes(db, p, q=q, merge=merge)
-    return {"items": [rt.push_out(r) for r in rows]}
+    start, end = _push_filters(startTime, endTime)
+    size = min(200, max(1, pageSize or 200))
+    pg = max(1, page or 1)
+    rows, total = rt.list_pushes(
+        db,
+        p,
+        q=q,
+        merge=merge,
+        tz=tz,
+        line=line,
+        area=area,
+        pc=pc,
+        start=start,
+        end=end,
+        page=pg,
+        page_size=size,
+    )
+    return {"items": [rt.push_out(r) for r in rows], "total": total, "page": pg, "pageSize": size}
 
 
 @router.get("/{pid}/pushes/export")
@@ -85,14 +123,33 @@ def export_pushes(
     pid: str,
     q: str = "",
     merge: bool = False,
+    startTime: str = "",
+    endTime: str = "",
+    tz: str = "",
+    line: str = "",
+    area: str = "",
+    pc: str = "",
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
     p = _must(db, pid)
-    rows = rt.list_pushes(db, p, q=q, merge=merge)
+    start, end = _push_filters(startTime, endTime)
+    rows, _total = rt.list_pushes(
+        db,
+        p,
+        q=q,
+        merge=merge,
+        tz=tz,
+        line=line,
+        area=area,
+        pc=pc,
+        start=start,
+        end=end,
+        paginate=False,
+    )
     data = export_table(
         "推送记录",
-        ["序号", "识别工序", "工序编码", "关联台座", "台座名称", "关联生产线", "区域", "状态", "识别时间", "数据来源", "来源细分", "测试", "已修改", "推送状态"],
+        ["序号", "识别工序", "工序编码", "关联台座", "台座名称", "关联生产线", "区域", "区域ID", "状态", "识别时间", "数据来源", "来源细分", "测试", "已修改", "推送状态"],
         [
             [
                 r.id,
@@ -101,6 +158,7 @@ def export_pushes(
                 r.trolley_tz,
                 r.seat_name,
                 r.line_code,
+                (r.area_name or "").strip() or "-",
                 r.area_code,
                 rt.sport_cn(r.sport_state),
                 rt.fmt_local(r.identify_time),
@@ -112,7 +170,7 @@ def export_pushes(
             ]
             for r in rows
         ],
-        [10, 18, 14, 14, 16, 14, 12, 10, 20, 10, 12, 8, 8, 10],
+        [10, 18, 14, 14, 16, 14, 16, 12, 10, 20, 10, 12, 8, 8, 10],
     )
     return _xlsx(data, f"{pid}-push-records.xlsx")
 

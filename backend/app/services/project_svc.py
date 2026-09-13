@@ -20,7 +20,7 @@ from ..schemas import (
     TemplateOut,
     TrolleyOut,
 )
-from .normalize import norm_epc, pretty_epc
+from .normalize import norm_epc, pretty_epc, norm_reader_id
 
 
 def write_log(db: Session, project_id: int | None, level: str, message: str) -> None:
@@ -167,6 +167,7 @@ def to_list_item(db: Session, p: Project) -> ProjectListItem:
 
 
 def replace_mapping(db: Session, p: Project, lines: list[dict], tag_nos: dict[str, list[str]]) -> None:
+    seen_epc: set[str] = set()
     db.query(Epc).filter(Epc.project_id == p.id).delete()
     for line in list(p.lines):
         db.delete(line)
@@ -191,8 +192,9 @@ def replace_mapping(db: Session, p: Project, lines: list[dict], tag_nos: dict[st
                     db.flush()
                     for epc in tag_nos.get(no, area.get("epcs") or []):
                         key = norm_epc(epc)
-                        if not key:
+                        if not key or key in seen_epc:
                             continue
+                        seen_epc.add(key)
                         tag.epcs.append(
                             Epc(
                                 project=p,
@@ -200,6 +202,8 @@ def replace_mapping(db: Session, p: Project, lines: list[dict], tag_nos: dict[st
                                 epc_norm=key,
                             )
                         )
+                    db.flush()
+    db.flush()
     db.expire(p)
 
 
@@ -208,7 +212,7 @@ def replace_trolleys(db: Session, p: Project, trolleys: list[dict]) -> None:
         db.delete(t)
     db.flush()
     for t in trolleys:
-        p.trolleys.append(Trolley(tz=t["tz"], name=t["name"], reader=t["reader"]))
+        p.trolleys.append(Trolley(tz=t["tz"], name=t["name"], reader=norm_reader_id(t["reader"]) or t["reader"]))
     db.flush()
     db.expire(p)
 

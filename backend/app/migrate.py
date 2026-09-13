@@ -49,7 +49,46 @@ def migrate(engine: Engine) -> None:
                 if name in existing:
                     continue
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+        _migrate_proc_unique(conn, insp)
         _migrate_default_templates(conn)
+
+
+def _migrate_proc_unique(conn, insp) -> None:
+    """允许同一产线内不同工序使用相同工序编号（按 编码+名称 区分）。"""
+    if "procedures" not in insp.get_table_names():
+        return
+    for uk in insp.get_unique_constraints("procedures"):
+        cols = list(uk.get("column_names") or [])
+        if cols == ["line_id", "code"]:
+            break
+    else:
+        return
+    conn.execute(text("PRAGMA foreign_keys=OFF"))
+    conn.execute(
+        text(
+            """
+            CREATE TABLE procedures_new (
+                id INTEGER NOT NULL PRIMARY KEY,
+                line_id INTEGER NOT NULL,
+                code VARCHAR(64) NOT NULL,
+                name VARCHAR(128) NOT NULL,
+                sort_order INTEGER NOT NULL,
+                CONSTRAINT uq_proc_line_code_name UNIQUE (line_id, code, name),
+                FOREIGN KEY(line_id) REFERENCES lines (id) ON DELETE CASCADE
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            "INSERT INTO procedures_new (id, line_id, code, name, sort_order) "
+            "SELECT id, line_id, code, name, sort_order FROM procedures"
+        )
+    )
+    conn.execute(text("DROP TABLE procedures"))
+    conn.execute(text("ALTER TABLE procedures_new RENAME TO procedures"))
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_procedures_line_id ON procedures (line_id)"))
+    conn.execute(text("PRAGMA foreign_keys=ON"))
 
 
 def _migrate_default_templates(conn) -> None:

@@ -99,7 +99,7 @@ class Line(Base):
 
 class Procedure(Base):
     __tablename__ = "procedures"
-    __table_args__ = (UniqueConstraint("line_id", "code", name="uq_proc_code"),)
+    __table_args__ = (UniqueConstraint("line_id", "code", "name", name="uq_proc_line_code_name"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     line_id: Mapped[int] = mapped_column(ForeignKey("lines.id", ondelete="CASCADE"), index=True)

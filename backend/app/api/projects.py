@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from ..db import get_db
@@ -23,6 +24,7 @@ from ..schemas import (
     TrolleyPatchIn,
 )
 from ..services.cache import rebuild_project_cache
+from ..services.normalize import norm_reader_id
 from ..services.project_svc import (
     apply_save,
     is_ready,
@@ -36,6 +38,17 @@ from ..services.project_svc import (
 )
 
 router = APIRouter(prefix="/api/v1/projects", tags=["projects"], dependencies=[Depends(get_current_user)])
+
+
+def _integrity_msg(exc: IntegrityError) -> str:
+    raw = str(getattr(exc, "orig", None) or exc)
+    if "procedures" in raw or "uq_proc" in raw:
+        return "该工序已存在"
+    if "epcs" in raw or "uq_epc" in raw:
+        return "EPC 重复，请检查映射表"
+    if "trolleys" in raw:
+        return "台车编号或读卡器 ID 重复"
+    return "保存失败：存在重复数据"
 
 
 def _must(db: Session, pid: str) -> Project:
@@ -84,8 +97,12 @@ def create_project(body: ProjectSaveIn, db: Session = Depends(get_db)):
     )
     db.add(p)
     db.flush()
-    apply_save(db, p, body)
-    db.flush()
+    try:
+        apply_save(db, p, body)
+        db.flush()
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(400, _integrity_msg(e)) from e
     p = load_project(db, p.pid)
     if not is_ready(p):
         raise HTTPException(400, "Step2 为必填：至少一条产线映射且台车映射不能为空")
@@ -99,8 +116,12 @@ def update_project(pid: str, body: ProjectSaveIn, db: Session = Depends(get_db))
     p = _must(db, pid)
     if body.pid.strip() != pid:
         raise HTTPException(400, "项目 PID 创建后不可修改")
-    apply_save(db, p, body)
-    db.flush()
+    try:
+        apply_save(db, p, body)
+        db.flush()
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(400, _integrity_msg(e)) from e
     p = load_project(db, pid)
     rebuild_project_cache(db, p.id)
     write_log(db, p.id, "信息", f"整体流程编辑保存：{p.name}")
@@ -274,8 +295,8 @@ def patch_proc(pid: str, line_code: str, code: str, body: ProcPatchIn, db: Sessi
         raise HTTPException(404, "工序不存在")
     if not body.name.strip() or not body.code.strip():
         raise HTTPException(400, "工序名称与工序编码均为必填")
-    if any(x.code == body.code.strip() and x.id != proc.id for x in line.procedures):
-        raise HTTPException(400, f"同一产线内工序编码 {body.code} 重复")
+    if any(x.code == body.code.strip() and x.name == body.name.strip() and x.id != proc.id for x in line.procedures):
+        raise HTTPException(400, "该工序已存在")
     old = f"{proc.code} / {proc.name}"
     proc.name = body.name.strip()
     proc.code = body.code.strip()
@@ -290,13 +311,20 @@ def order_procs(pid: str, line_code: str, body: ProcOrderIn, db: Session = Depen
     line = next((x for x in p.lines if x.code == line_code), None)
     if not line:
         raise HTTPException(404, "产线不存在")
-    ix = {x.code: x for x in line.procedures}
-    if set(body.codes) != set(ix):
+    remaining = list(line.procedures)
+    ordered = []
+    for c in body.codes:
+        hit = next((x for x in remaining if x.code == c), None)
+        if not hit:
+            raise HTTPException(400, "工序列表与当前不一致")
+        remaining.remove(hit)
+        ordered.append(hit)
+    if remaining:
         raise HTTPException(400, "工序列表与当前不一致")
-    for i, c in enumerate(body.codes, start=1):
-        ix[c].sort_order = i
+    for i, proc in enumerate(ordered, start=1):
+        proc.sort_order = i
     db.flush()
-    names = " → ".join(ix[c].name for c in body.codes)
+    names = " → ".join(proc.name for proc in ordered)
     write_log(db, p.id, "信息", f"调整工序顺序（{line.name}）：{names}")
     rebuild_project_cache(db, p.id)
     return to_out(db, load_project(db, pid))
@@ -323,13 +351,14 @@ def patch_trolley(pid: str, tz: str, body: TrolleyPatchIn, db: Session = Depends
     t = next((x for x in p.trolleys if x.tz == tz), None)
     if not t:
         raise HTTPException(404, "台车不存在")
+    reader = norm_reader_id(body.reader) or body.reader.strip()
     if any(x.tz == body.tz and x.id != t.id for x in p.trolleys):
         raise HTTPException(400, "台车 ID 重复")
-    if any(x.reader == body.reader and x.id != t.id for x in p.trolleys):
+    if any(x.reader == reader and x.id != t.id for x in p.trolleys):
         raise HTTPException(400, "读卡器 ID 重复")
     t.tz = body.tz.strip()
     t.name = body.name.strip()
-    t.reader = body.reader.strip()
+    t.reader = reader
     rebuild_project_cache(db, p.id)
     write_log(db, p.id, "信息", f"编辑台车 {t.tz}")
     return to_out(db, load_project(db, pid))

@@ -10,7 +10,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-from .normalize import cell_str, pretty_epc
+from .normalize import cell_str, pretty_epc, norm_reader_id
 
 POS_HEADERS = ["生产线", "生产线ID", "工序", "工序ID", "区域", "区域ID", "蓝牙标签编号"]
 NO_HEADERS = ["No.", "EPC"]
@@ -32,7 +32,17 @@ NO_ALIASES = {
 TZ_ALIASES = {
     "台座名称": {"台座名称", "名称", "台车名称"},
     "编号": {"编号", "台车id", "台车ID", "tz"},
-    "台座安装LYG": {"台座安装lyg", "台座安装LYG", "读卡器", "读卡器id", "读卡器ID", "设备id", "设备ID", "reader"},
+    "台座安装LYG": {
+        "台座安装",
+        "台座安装lyg",
+        "台座安装LYG",
+        "读卡器",
+        "读卡器id",
+        "读卡器ID",
+        "设备id",
+        "设备ID",
+        "reader",
+    },
 }
 
 HEADER_FILL = PatternFill("solid", fgColor="E8F6F0")
@@ -69,21 +79,54 @@ def _map_headers(row: list[str], aliases: dict[str, set[str]], required: list[st
     return found
 
 
+def _fill_merged_cells(ws: Worksheet) -> None:
+    """合并单元格只有左上角有值，拆开后补到范围内每一格，避免末行区域/标签被读成空。"""
+    ranges = list(ws.merged_cells.ranges)
+    blobs = []
+    for mr in ranges:
+        min_col, min_row, max_col, max_row = mr.bounds
+        val = ws.cell(min_row, min_col).value
+        blobs.append((str(mr), min_row, max_row, min_col, max_col, val))
+    for ref, min_row, max_row, min_col, max_col, val in blobs:
+        try:
+            ws.unmerge_cells(ref)
+        except Exception:
+            continue
+        for r in range(min_row, max_row + 1):
+            for c in range(min_col, max_col + 1):
+                if ws.cell(r, c).value is None:
+                    ws.cell(r, c).value = val
+
+
 def _iter_rows(ws: Worksheet) -> list[list[Any]]:
+    max_r = ws.max_row or 0
+    max_c = ws.max_column or 0
     rows = []
-    for row in ws.iter_rows(values_only=True):
+    for row in ws.iter_rows(min_row=1, max_row=max_r, min_col=1, max_col=max_c, values_only=True):
         rows.append(list(row))
     return rows
 
 
 def read_first_sheet(data: bytes) -> list[list[Any]]:
-    wb = load_workbook(BytesIO(data), read_only=True, data_only=True)
+    # 不用 read_only：Excel 缓存的 dimension 常少算最后一行
+    wb = load_workbook(BytesIO(data), data_only=True)
     ws = wb[wb.sheetnames[0]]
+    if hasattr(ws, "reset_dimensions"):
+        try:
+            ws.reset_dimensions()
+        except Exception:
+            pass
+    _fill_merged_cells(ws)
     rows = _iter_rows(ws)
     wb.close()
+    while rows and not any(cell_str(c) for c in rows[-1]):
+        rows.pop()
     if not rows:
         raise ValueError("工作表为空")
     return rows
+
+
+_POS_CARRY = ["生产线", "生产线ID", "工序", "工序ID", "区域", "区域ID"]
 
 
 def parse_position_file(data: bytes) -> tuple[list[dict], list[dict]]:
@@ -97,10 +140,16 @@ def parse_position_file(data: bytes) -> tuple[list[dict], list[dict]]:
         errors.append({"level": "err", "title": "位置-编号映射表表头", "detail": str(e), "file": "位置表", "row": 1, "column": "表头"})
         return [], errors
     out = []
+    last = {k: "" for k in POS_HEADERS}
     for n, row in enumerate(rows[1:], start=2):
         if not any(cell_str(c) for c in row):
             continue
         item = {k: cell_str(row[idx[k]] if idx[k] < len(row) else "") for k in POS_HEADERS}
+        for k in _POS_CARRY:
+            if item[k]:
+                last[k] = item[k]
+            else:
+                item[k] = last[k]
         empty = [k for k in POS_HEADERS if not item[k]]
         if empty:
             errors.append(
@@ -198,8 +247,9 @@ def parse_trolley_file(data: bytes) -> tuple[list[dict], list[dict]]:
             continue
         name = cell_str(row[idx["台座名称"]] if idx["台座名称"] < len(row) else "")
         tz = cell_str(row[idx["编号"]] if idx["编号"] < len(row) else "")
-        reader = cell_str(row[idx["台座安装LYG"]] if idx["台座安装LYG"] < len(row) else "")
-        if not name or not tz or not reader:
+        raw_reader = cell_str(row[idx["台座安装LYG"]] if idx["台座安装LYG"] < len(row) else "")
+        reader = norm_reader_id(raw_reader)
+        if not name or not tz or not raw_reader:
             miss = [k for k, v in (("台座名称", name), ("编号", tz), ("台座安装LYG", reader)) if not v]
             errors.append(
                 {
@@ -256,12 +306,13 @@ def build_lines_from_pos(pos_rows: list[dict], no_map: dict[str, list[str]]) -> 
             line_ix[lid] = node
             lines.append(node)
         line = line_ix[lid]
-        proc_ix = {p["code"]: p for p in line["procs"]}
-        if row["工序ID"] not in proc_ix:
+        proc_key = (row["工序ID"], row["工序"])
+        proc_ix = {(p["code"], p["name"]): p for p in line["procs"]}
+        if proc_key not in proc_ix:
             proc = {"code": row["工序ID"], "name": row["工序"], "order": len(line["procs"]) + 1, "areas": []}
             line["procs"].append(proc)
-            proc_ix[row["工序ID"]] = proc
-        proc = proc_ix[row["工序ID"]]
+            proc_ix[proc_key] = proc
+        proc = proc_ix[proc_key]
         area_ix = {a["id"]: a for a in proc["areas"]}
         if row["区域ID"] not in area_ix:
             area = {"id": row["区域ID"], "name": row["区域"], "nos": [], "epcs": []}
@@ -315,6 +366,7 @@ def build_template(kind: str) -> bytes:
             "填写说明",
             [
                 "一行 = 一个「区域 + 一个蓝牙标签编号」。同一区域通常连续 3 行（3 个编号）。",
+                "连续行可只填变化列，空白的生产线/工序/区域将沿用上一行，避免末行标签丢失。",
                 "工序顺序 = 本文件中该产线工序的出现顺序，导入后仍可在页面拖拽调整。",
                 "必须与「编号-映射表」一起导入；系统按标签编号拼接 EPC。",
             ],
@@ -343,6 +395,7 @@ def build_template(kind: str) -> bytes:
             "填写说明",
             [
                 "一行 = 一台台车（台座）与其读卡器的绑定。",
+                "第三列表头可为「台座安装」或「台座安装LYG」。读卡器编号按原文导入，支持 LYG01、RFID1、OF1 等字母+数字格式。",
                 "编号、读卡器 ID 在本项目内必须唯一。空行自动跳过。",
             ],
         )

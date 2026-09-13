@@ -18,6 +18,35 @@ from ..services.project_svc import load_project, write_log
 LOCK = threading.Lock()
 
 
+def _dbg(message: str, data: dict, hid: str, loc: str) -> None:
+    # #region agent log
+    import json
+    import time
+    from pathlib import Path
+
+    try:
+        p = Path(__file__).resolve().parents[3] / "debug-537a1e.log"
+        with p.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "sessionId": "537a1e",
+                        "runId": "post-fix",
+                        "hypothesisId": hid,
+                        "location": loc,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -39,6 +68,28 @@ def fmt_local(dt: Optional[datetime], ms: bool = False) -> str:
     if ms:
         return f"{base}.{local.microsecond // 1000:03d}"
     return base
+
+
+def parse_query_dt(value: Optional[str], *, end: bool = False) -> Optional[datetime]:
+    text = (value or "").strip()
+    if not text:
+        return None
+    text = text.replace("T", " ")
+    naive = None
+    matched = ""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            naive = datetime.strptime(text, fmt)
+            matched = fmt
+            break
+        except ValueError:
+            continue
+    if naive is None:
+        raise ValueError("时间格式无效，请使用 YYYY-MM-DD HH:MM")
+    if end and matched == "%Y-%m-%d %H:%M":
+        naive = naive.replace(second=59)
+    tz = datetime.now().astimezone().tzinfo
+    return naive.replace(tzinfo=tz)
 
 
 def sport_cn(state: str) -> str:
@@ -167,12 +218,6 @@ def deliver(db: Session, project: Project, rec: PushRecord, force: bool = False)
     auto = rec.source != "manual"
     if rec.test:
         rec.status = "success"
-        write_log(
-            db,
-            project.id,
-            "信息",
-            f"台车 {rec.trolley_tz} 测试记录已生成本地（来源:auto·{rec.kind}·测试，默认不外发客户接口）",
-        )
         return True, {"code": None, "msg": "测试记录已生成本地，未外发客户接口"}
     if auto and not project.push_enabled and not force:
         rec.status = "pending"
@@ -458,6 +503,7 @@ def start_test(db: Session, project: Project) -> dict:
         "信息",
         f"测试模式启动：为 {len(trolleys)} 台车分配初始位置（按台车顺序平均分配到各产线）—— " + "；".join(det),
     )
+    _dbg("test-start", {"pid": project.pid, "trolleys": len(trolleys), "fast": bool(project.test_fast)}, "A,E", "runtime.py:start_test")
     return {"ok": True, "detail": det}
 
 
@@ -506,6 +552,7 @@ def test_tick(db: Session, project: Project) -> None:
     project.test_tick = int(project.test_tick or 0) + 1
     tick = project.test_tick
     trolleys = list(project.trolleys)
+    n = 0
     for t in trolleys:
         loc = loc_of(db, project, t)
         if loc.skip_tick == tick:
@@ -556,6 +603,7 @@ def test_tick(db: Session, project: Project) -> None:
             hex_data=_simulate_hex(tick, epc),
             epc=epc,
         )
+        n += 1
         if loop:
             write_log(
                 db,
@@ -563,6 +611,9 @@ def test_tick(db: Session, project: Project) -> None:
                 "信息",
                 f"台车 {t.tz} 已走完 {line.name} 全部工序，回到首工序 {procs[0].name} 重新开始（不跨产线）",
             )
+    if n:
+        write_log(db, project.id, "信息", f"测试推进第 {tick} 轮：更新 {n} 台车位置并生成本地记录")
+        _dbg("test-tick", {"pid": project.pid, "tick": tick, "n": n}, "F", "runtime.py:test_tick")
 
 
 def keep_tick(db: Session, project: Project, test: bool) -> None:
@@ -607,6 +658,7 @@ def keep_tick(db: Session, project: Project, test: bool) -> None:
             "成功",
             f"定时保持推送：位置未变，复制上一条记录、更新识别时间与运动状态续推 {n} 条（间隔 {keep_label(project)}）",
         )
+        _dbg("keep-tick", {"pid": project.pid, "n": n, "test": bool(test)}, "F", "runtime.py:keep_tick")
 
 
 def place_trolley(db: Session, project: Project, tz: str, line_code: str, proc_code: str, area_code: str = "") -> dict:
@@ -614,10 +666,24 @@ def place_trolley(db: Session, project: Project, tz: str, line_code: str, proc_c
     if not trolley:
         raise ValueError("台车不存在")
     line = find_line(project, line_code)
-    proc = find_proc(line, proc_code)
-    if not line or not proc:
+    if not line:
         raise ValueError("产线或工序不存在")
-    area = find_area(proc, area_code) if area_code else (proc.areas[0] if proc.areas else None)
+    proc = None
+    area = None
+    if area_code:
+        for p in line.procedures:
+            if proc_code and p.code != proc_code:
+                continue
+            hit = find_area(p, area_code)
+            if hit:
+                proc, area = p, hit
+                break
+    if not proc:
+        proc = find_proc(line, proc_code)
+    if not proc:
+        raise ValueError("产线或工序不存在")
+    if not area:
+        area = find_area(proc, area_code) if area_code else (proc.areas[0] if proc.areas else None)
     if not area:
         raise ValueError("该工序没有可投放区域")
     apply_place(
@@ -636,7 +702,7 @@ def place_trolley(db: Session, project: Project, tz: str, line_code: str, proc_c
         db,
         project.id,
         "成功",
-        f"台车 {trolley.tz} 手动标位 → {line.name}·{proc.name}，已触发推送（来源:manual）",
+        f"台车 {trolley.tz} 手动标位 → {line.name}·{proc.name}·{area.name}，已触发推送（来源:manual）",
     )
     return {"ok": True, "tz": trolley.tz, "line": line.code, "proc": proc.code, "area": area.code}
 
@@ -772,8 +838,35 @@ def merge_rows(rows: list[PushRecord]) -> list[PushRecord]:
     return out
 
 
-def list_pushes(db: Session, project: Project, q: str = "", merge: bool = False) -> list[PushRecord]:
-    rows = db.scalars(select(PushRecord).where(PushRecord.project_id == project.id).order_by(PushRecord.id.desc()).limit(800)).all()
+def list_pushes(
+    db: Session,
+    project: Project,
+    q: str = "",
+    merge: bool = False,
+    tz: str = "",
+    line: str = "",
+    area: str = "",
+    pc: str = "",
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    page: int = 1,
+    page_size: int = 200,
+    paginate: bool = True,
+) -> tuple[list[PushRecord], int]:
+    stmt = select(PushRecord).where(PushRecord.project_id == project.id)
+    if tz:
+        stmt = stmt.where(PushRecord.trolley_tz == tz)
+    if line:
+        stmt = stmt.where(PushRecord.line_code == line)
+    if area:
+        stmt = stmt.where(PushRecord.area_code == area)
+    if pc:
+        stmt = stmt.where(PushRecord.proc_code == pc)
+    if start is not None:
+        stmt = stmt.where(PushRecord.identify_time >= start)
+    if end is not None:
+        stmt = stmt.where(PushRecord.identify_time <= end)
+    rows = db.scalars(stmt.order_by(PushRecord.id.desc())).all()
     if q:
         key = q.lower()
         rows = [
@@ -788,6 +881,7 @@ def list_pushes(db: Session, project: Project, q: str = "", merge: bool = False)
                     r.seat_name or "",
                     r.line_code or "",
                     r.area_code or "",
+                    r.area_name or "",
                     sport_cn(r.sport_state),
                     src_cn(r.source),
                     r.kind or "",
@@ -796,7 +890,13 @@ def list_pushes(db: Session, project: Project, q: str = "", merge: bool = False)
         ]
     if merge:
         rows = merge_rows(rows)
-    return rows
+    total = len(rows)
+    if not paginate:
+        return rows, total
+    size = min(200, max(1, int(page_size or 200)))
+    pg = max(1, int(page or 1))
+    start_i = (pg - 1) * size
+    return rows[start_i : start_i + size], total
 
 
 def push_out(r: PushRecord) -> dict:
@@ -817,7 +917,6 @@ def push_out(r: PushRecord) -> dict:
         "test": bool(r.test),
         "edited": bool(r.edited),
         "status": r.status,
-        "payload": r.payload or {},
         "refId": r.ref_id,
     }
 
@@ -1018,8 +1117,11 @@ def clear_logs(db: Session, project: Project) -> None:
     db.query(SysLog).filter(SysLog.project_id == project.id).delete()
 
 
-def tick_all(db: Session) -> None:
+def tick_all(db: Session) -> bool:
     now = now_utc()
+    t0 = now
+    did = 0
+    dirty = False
     rows = db.scalars(select(Project)).all()
     for stub in rows:
         due_adv = bool(stub.test_on and stub.test_next_adv and now >= aware(stub.test_next_adv))
@@ -1027,12 +1129,15 @@ def tick_all(db: Session) -> None:
         due_keep_prod = bool(not stub.test_on and stub.keep_next and now >= aware(stub.keep_next))
         if not stub.test_on and not stub.keep_next:
             stub.keep_next = now + timedelta(seconds=keep_sec(stub))
+            dirty = True
             continue
         if not (due_adv or due_keep_test or due_keep_prod):
             continue
         p = load_project(db, stub.pid)
         if not p:
             continue
+        did += 1
+        dirty = True
         if due_adv:
             test_tick(db, p)
             p.test_next_adv = now_utc() + timedelta(seconds=adv_sec(p))
@@ -1042,3 +1147,18 @@ def tick_all(db: Session) -> None:
         if due_keep_prod:
             keep_tick(db, p, test=False)
             p.keep_next = now_utc() + timedelta(seconds=keep_sec(p))
+        _dbg(
+            "tick-work",
+            {
+                "pid": stub.pid,
+                "dueAdv": due_adv,
+                "dueKeepTest": due_keep_test,
+                "dueKeepProd": due_keep_prod,
+                "testOn": bool(stub.test_on),
+                "ms": int((now_utc() - t0).total_seconds() * 1000),
+                "jobs": did,
+            },
+            "F",
+            "runtime.py:tick_all",
+        )
+    return dirty

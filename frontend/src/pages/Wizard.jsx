@@ -218,7 +218,26 @@ function MapOne({ draft, setDraft, sel, setSel, line, proc, area, toast, setImp,
   }
   function addProc() {
     if (!line) return toast("请先选产线");
-    const g = { code: "GX_" + String((line.procs.length + 1) * 10).padStart(4, "0"), name: "新工序", order: line.procs.length + 1, areas: [] };
+    const usedCodes = new Set();
+    const usedNames = new Set();
+    draft.lines.forEach((l) => (l.procs || []).forEach((g) => {
+      if (g.code) usedCodes.add(g.code);
+      if (g.name) usedNames.add(g.name);
+    }));
+    let n = 10;
+    let code = "GX_" + String(n).padStart(4, "0");
+    while (usedCodes.has(code)) {
+      n += 10;
+      code = "GX_" + String(n).padStart(4, "0");
+    }
+    let name = "新工序";
+    if (usedNames.has(name)) {
+      let i = 2;
+      while (usedNames.has("新工序" + i)) i += 1;
+      name = "新工序" + i;
+    }
+    if ((line.procs || []).some((g) => g.code === code && g.name === name)) return toast("该工序已存在", "校验");
+    const g = { code, name, order: line.procs.length + 1, areas: [] };
     line.procs = line.procs.concat([g]);
     setDraft({ ...draft, lines: [...draft.lines] });
     setSel({ ...sel, proc: line.procs.length - 1, area: 0 });
@@ -271,12 +290,12 @@ function MapOne({ draft, setDraft, sel, setSel, line, proc, area, toast, setImp,
           <div className="drill-h"><span className="t">② 工序（拖拽 / ↑↓ 即顺序）</span><button className="btn sm" onClick={addProc}>+ 工序</button></div>
           <div className="drill-b">
             {(line?.procs || []).map((g, i) => (
-              <button key={g.code + i} className={"drill-item" + (i === sel.proc ? " on" : "")} onClick={() => setSel({ ...sel, proc: i, area: 0 })}>
+              <button key={g.code + g.name + i} className={"drill-item" + (i === sel.proc ? " on" : "")} onClick={() => setSel({ ...sel, proc: i, area: 0 })}>
                 <span><span className="nm">{i + 1}. {g.name}</span><br /><span className="sub">{g.code}</span></span>
                 <span className="tail">
                   <button className="btn sm" onClick={(e) => { e.stopPropagation(); moveProc(i, -1); }}>↑</button>
                   <button className="btn sm" onClick={(e) => { e.stopPropagation(); moveProc(i, 1); }}>↓</button>
-                  <span className="pen" onClick={(e) => { e.stopPropagation(); setEdit({ type: "proc", i }); }}>✎</span>
+                  <span className="pen" onClick={(e) => { e.stopPropagation(); setEdit({ type: "proc", line: sel.line, i }); }}>✎</span>
                   <span className="x" onClick={(e) => { e.stopPropagation(); line.procs.splice(i, 1); line.procs.forEach((x, idx) => (x.order = idx + 1)); setDraft({ ...draft, lines: [...draft.lines] }); setSel({ ...sel, proc: 0, area: 0 }); }}>×</span>
                 </span>
               </button>
@@ -395,39 +414,42 @@ function Step3({ draft, setDraft, toast }) {
 }
 
 function EditModal({ edit, draft, setDraft, toast, onClose }) {
-  const line = draft.lines[edit.i >= 0 ? (edit.type === "line" ? edit.i : undefined) : 0];
-  const target = edit.type === "line" ? draft.lines[edit.i] : draft.lines.find((_, idx) => idx === (edit.line ?? 0))?.procs?.[edit.i];
-  const [name, setName] = useStateSafe(edit.type === "line" ? draft.lines[edit.i]?.name : "");
-  const [id, setId] = useStateSafe(edit.type === "line" ? draft.lines[edit.i]?.id : "");
-  // simpler: read current
-  const cur = edit.type === "line" ? draft.lines[edit.i] : null;
+  if (edit.type === "line") {
+    return <LineEditModal edit={edit} draft={draft} setDraft={setDraft} toast={toast} onClose={onClose} />;
+  }
+  return <ProcEditModal edit={edit} draft={draft} setDraft={setDraft} toast={toast} onClose={onClose} />;
+}
+
+function LineEditModal({ edit, draft, setDraft, toast, onClose }) {
+  const cur = draft.lines[edit.i];
   const [nm, setNm] = useStateSafe(cur?.name || "");
   const [cd, setCd] = useStateSafe(cur?.id || "");
-  if (edit.type === "line" && cur) {
-    return (
-      <Modal title={"编辑产线 · " + cur.name} onClose={onClose} foot={<><button className="btn" onClick={onClose}>取消</button><button className="btn primary" onClick={() => {
-        if (!nm.trim() || !cd.trim()) return toast("产线名称与产线 ID 均为必填", "校验");
-        if (draft.lines.some((x, i) => i !== edit.i && x.id === cd.trim())) return toast("产线 ID 已存在", "校验");
-        cur.name = nm.trim(); cur.id = cd.trim();
-        setDraft({ ...draft, lines: [...draft.lines] }); onClose();
-      }}>保存</button></>}>
-        <div className="grid g2">
-          <Field label="产线名称"><input className="input" value={nm} onChange={(e) => setNm(e.target.value)} /></Field>
-          <Field label="产线 ID"><input className="input mono" value={cd} onChange={(e) => setCd(e.target.value)} /></Field>
-        </div>
-      </Modal>
-    );
-  }
-  const L = draft.lines.find((l) => l === line) || draft.lines[0];
-  const g = L?.procs?.[edit.i];
+  if (!cur) return null;
+  return (
+    <Modal title={"编辑产线 · " + cur.name} onClose={onClose} foot={<><button className="btn" onClick={onClose}>取消</button><button className="btn primary" onClick={() => {
+      if (!nm.trim() || !cd.trim()) return toast("产线名称与产线 ID 均为必填", "校验");
+      if (draft.lines.some((x, i) => i !== edit.i && x.id === cd.trim())) return toast("产线 ID 已存在", "校验");
+      cur.name = nm.trim(); cur.id = cd.trim();
+      setDraft({ ...draft, lines: [...draft.lines] }); onClose();
+    }}>保存</button></>}>
+      <div className="grid g2">
+        <Field label="产线名称"><input className="input" value={nm} onChange={(e) => setNm(e.target.value)} /></Field>
+        <Field label="产线 ID"><input className="input mono" value={cd} onChange={(e) => setCd(e.target.value)} /></Field>
+      </div>
+    </Modal>
+  );
+}
+
+function ProcEditModal({ edit, draft, setDraft, toast, onClose }) {
+  const host = draft.lines[edit.line ?? 0] || draft.lines[0];
+  const g = host?.procs?.[edit.i];
   const [pn, setPn] = useStateSafe(g?.name || "");
   const [pc, setPc] = useStateSafe(g?.code || "");
+  if (!g) return null;
   return (
     <Modal title={"编辑工序 · " + (g?.name || "")} onClose={onClose} foot={<><button className="btn" onClick={onClose}>取消</button><button className="btn primary" onClick={() => {
       if (!pn.trim() || !pc.trim()) return toast("工序名称与编码均为必填", "校验");
-      const parent = draft.lines[ /* current selected line via edit */ 0];
-      const host = draft.lines.find((l) => l.procs.includes(g)) || draft.lines[0];
-      if (host.procs.some((x) => x !== g && x.code === pc.trim())) return toast("同一产线内工序编码重复", "校验");
+      if (host.procs.some((x) => x !== g && x.code === pc.trim() && x.name === pn.trim())) return toast("该工序已存在", "校验");
       g.name = pn.trim(); g.code = pc.trim();
       setDraft({ ...draft, lines: [...draft.lines] }); onClose();
     }}>保存</button></>}>

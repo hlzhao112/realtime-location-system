@@ -24,3 +24,8 @@ def cell_str(value) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value).strip()
+
+
+def norm_reader_id(value: str | None) -> str:
+    """保留读卡器原始编号（LYG01 / RFID1 / OF1 等），只做去空白。"""
+    return cell_str(value)

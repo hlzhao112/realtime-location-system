@@ -16,6 +16,17 @@ function uniqueOptions(rows, key, labelFn) {
   return Array.from(seen.entries()).sort((a, b) => a[1].localeCompare(b[1], "zh"));
 }
 
+const PAGE_SIZE = 200;
+
+function areaLabel(r) {
+  const name = String(r?.areaName || "").trim();
+  return name || "-";
+}
+
+function sortedOpts(map) {
+  return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1], "zh"));
+}
+
 function HeaderFilter({ value, onChange, options, placeholder }) {
   return (
     <select
@@ -34,7 +45,8 @@ function HeaderFilter({ value, onChange, options, placeholder }) {
 function TzCard({ t, list, onDragStart }) {
   const stale = !t.online;
   const mins = t.mins == null ? "—" : t.mins;
-  const tip = `最后上报 ${t.last || "—"} · 停留 ${mins} min${t.areaCode ? " · 区域 " + t.areaCode : ""}${t.reissue ? " · 连续补发×" + t.reissue : ""} · 来源 ${t.src}`;
+  const areaText = String(t.areaName || "").trim() || "-";
+  const tip = `最后上报 ${t.last || "—"} · 停留 ${mins} min${t.areaCode ? " · 区域 " + areaText : ""}${t.reissue ? " · 连续补发×" + t.reissue : ""} · 来源 ${t.src}`;
   return (
     <div
       className={"tz" + (stale ? " stale" : "") + (t.test ? " tmk" : "")}
@@ -69,23 +81,63 @@ export default function Board({ project, toast, startWizard }) {
   const [qRec, setQRec] = useState("");
   const [merge, setMerge] = useState(false);
   const [colF, setColF] = useState({ tz: "", line: "", area: "", pc: "" });
+  const [timeFrom, setTimeFrom] = useState("");
+  const [timeTo, setTimeTo] = useState("");
+  const [page, setPage] = useState(1);
+  const [recTotal, setRecTotal] = useState(0);
   const [modal, setModal] = useState(null);
   const [pushingId, setPushingId] = useState(null);
   const linesRef = useRef(null);
   const [linesH, setLinesH] = useState(null);
+  const inflightRef = useRef(0);
+  const resizeNRef = useRef(0);
   const pid = project.pid;
 
   const load = useCallback(async () => {
-    const [b, p] = await Promise.all([api.board(pid), api.pushes(pid, qRec, merge)]);
-    setBoard(b);
-    setRecs(p.items || []);
-  }, [pid, qRec, merge]);
+    if (inflightRef.current) return;
+    inflightRef.current = 1;
+    const t0 = performance.now();
+    try {
+      const [b, p] = await Promise.all([api.board(pid), api.pushes(pid, qRec, merge, {
+        page,
+        pageSize: PAGE_SIZE,
+        startTime: timeFrom || undefined,
+        endTime: timeTo || undefined,
+        tz: colF.tz || undefined,
+        line: colF.line || undefined,
+        area: colF.area || undefined,
+        pc: colF.pc || undefined,
+      })]);
+      setBoard(b);
+      setRecs(p.items || []);
+      setRecTotal(typeof p.total === "number" ? p.total : (p.items || []).length);
+      // #region agent log
+      fetch("http://127.0.0.1:7259/ingest/42287c2f-2aca-4b5e-a241-93e737ef8f41", { method: "POST", headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "537a1e" }, body: JSON.stringify({ sessionId: "537a1e", runId: "post-fix", hypothesisId: "A,E", location: "Board.jsx:load", message: "board-load", data: { ms: Math.round(performance.now() - t0), inflight: inflightRef.current, recs: (p.items || []).length, trolleys: (b.trolleys || []).length, testOn: !!(b.test && b.test.on), testMade: b.test && b.test.made }, timestamp: Date.now() }) }).catch(() => {});
+      // #endregion
+    } finally {
+      inflightRef.current = 0;
+    }
+  }, [pid, qRec, merge, page, timeFrom, timeTo, colF]);
 
   useEffect(() => {
     load().catch((e) => toast(e.message));
-    const t = setInterval(() => load().catch(() => {}), 2000);
-    return () => clearInterval(t);
-  }, [load, toast]);
+    const boardT = setInterval(() => {
+      api.board(pid).then(setBoard).catch(() => {});
+    }, 2000);
+    const pushT = setInterval(() => load().catch(() => {}), 10000);
+    // #region agent log
+    const onMove = (e) => {
+      const el = e.target;
+      fetch("http://127.0.0.1:7259/ingest/42287c2f-2aca-4b5e-a241-93e737ef8f41", { method: "POST", headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "537a1e" }, body: JSON.stringify({ sessionId: "537a1e", runId: "post-fix", hypothesisId: "B,D", location: "Board.jsx:mousemove", message: "mouse", data: { cursor: el && el.nodeType === 1 ? getComputedStyle(el).cursor : "", cls: (el && el.className) || "", pointerLock: !!document.pointerLockElement, buttons: e.buttons }, timestamp: Date.now() }) }).catch(() => {});
+    };
+    window.addEventListener("mousemove", onMove, { once: true });
+    // #endregion
+    return () => {
+      clearInterval(boardT);
+      clearInterval(pushT);
+      window.removeEventListener("mousemove", onMove);
+    };
+  }, [load, toast, pid]);
 
   const trolleys = board?.trolleys || [];
   const lines = project.lines || [];
@@ -105,24 +157,112 @@ export default function Board({ project, toast, startWizard }) {
   useEffect(() => {
     const el = linesRef.current;
     if (!el) return undefined;
-    const sync = () => setLinesH(el.offsetHeight);
+    let raf = 0;
+    let last = -1;
+    const sync = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const h = Math.round(el.getBoundingClientRect().height);
+        if (last >= 0 && Math.abs(h - last) < 2) return;
+        last = h;
+        resizeNRef.current += 1;
+        setLinesH(h);
+        // #region agent log
+        fetch("http://127.0.0.1:7259/ingest/42287c2f-2aca-4b5e-a241-93e737ef8f41", { method: "POST", headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "537a1e" }, body: JSON.stringify({ sessionId: "537a1e", runId: "post-fix", hypothesisId: "C", location: "Board.jsx:resize", message: "lines-resize", data: { n: resizeNRef.current, h, applied: true }, timestamp: Date.now() }) }).catch(() => {});
+        // #endregion
+      });
+    };
     sync();
     const ro = new ResizeObserver(sync);
     ro.observe(el);
-    return () => ro.disconnect();
-  }, [lines.length, trolleys.length, test.on, test.made, test.recs]);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  }, [lines.length, pid]);
 
-  const shownRecs = useMemo(() => recs.filter((r) => (
-    (!colF.tz || r.tz === colF.tz)
-    && (!colF.line || r.line === colF.line)
-    && (!colF.area || r.area === colF.area)
-    && (!colF.pc || r.pc === colF.pc)
-  )), [recs, colF]);
+  const shownRecs = recs;
 
-  const tzOpts = useMemo(() => uniqueOptions(recs, "tz", (r) => `${r.tz} ${r.seat || ""}`.trim()), [recs]);
-  const lineOpts = useMemo(() => uniqueOptions(recs, "line"), [recs]);
-  const areaOpts = useMemo(() => uniqueOptions(recs, "area"), [recs]);
-  const pcOpts = useMemo(() => uniqueOptions(recs, "pc", (r) => `${r.pn || ""} ${r.pc || ""}`.trim()), [recs]);
+  const tzOpts = useMemo(() => {
+    const seen = new Map(uniqueOptions(recs, "tz", (r) => `${r.tz} ${r.seat || ""}`.trim()));
+    (project.trolleys || []).forEach((t) => {
+      if (t.tz && !seen.has(t.tz)) seen.set(t.tz, `${t.tz} ${t.name || ""}`.trim());
+    });
+    return sortedOpts(seen);
+  }, [recs, project.trolleys]);
+  const lineOpts = useMemo(() => {
+    const seen = new Map(uniqueOptions(recs, "line"));
+    (project.lines || []).forEach((l) => {
+      if (l.id && !seen.has(l.id)) seen.set(l.id, l.name || l.id);
+    });
+    return sortedOpts(seen);
+  }, [recs, project.lines]);
+  const areaOpts = useMemo(() => {
+    const seen = new Map();
+    (project.lines || []).forEach((l) => {
+      (l.procs || []).forEach((g) => {
+        (g.areas || []).forEach((a) => {
+          if (a?.id && !seen.has(a.id)) seen.set(a.id, String(a.name || "").trim() || "-");
+        });
+      });
+    });
+    recs.forEach((r) => {
+      if (r.area && !seen.has(r.area)) seen.set(r.area, areaLabel(r));
+    });
+    return sortedOpts(seen);
+  }, [recs, project.lines]);
+  const pcOpts = useMemo(() => {
+    const seen = new Map(uniqueOptions(recs, "pc", (r) => `${r.pn || ""} ${r.pc || ""}`.trim()));
+    (project.lines || []).forEach((l) => {
+      (l.procs || []).forEach((g) => {
+        if (g.code && !seen.has(g.code)) seen.set(g.code, `${g.name || ""} ${g.code}`.trim());
+      });
+    });
+    return sortedOpts(seen);
+  }, [recs, project.lines]);
+
+  const pageCount = Math.max(1, Math.ceil((recTotal || 0) / PAGE_SIZE));
+  const showPager = recTotal > PAGE_SIZE;
+
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
+  function applyColF(key, value) {
+    setColF((f) => ({ ...f, [key]: value }));
+    setPage(1);
+  }
+
+  function applyTime(which, value) {
+    const nextFrom = which === "from" ? value : timeFrom;
+    const nextTo = which === "to" ? value : timeTo;
+    if (nextFrom && nextTo && nextTo < nextFrom) {
+      toast("结束时间不能小于开始时间");
+      return;
+    }
+    if (which === "from") setTimeFrom(value);
+    else setTimeTo(value);
+    setPage(1);
+  }
+
+  function resetFilters() {
+    setQRec("");
+    setMerge(false);
+    setColF({ tz: "", line: "", area: "", pc: "" });
+    setTimeFrom("");
+    setTimeTo("");
+    setPage(1);
+  }
+
+  const pushQueryExtra = {
+    startTime: timeFrom || undefined,
+    endTime: timeTo || undefined,
+    tz: colF.tz || undefined,
+    line: colF.line || undefined,
+    area: colF.area || undefined,
+    pc: colF.pc || undefined,
+  };
 
   async function run(fn, okMsg, okK) {
     try {
@@ -155,20 +295,22 @@ export default function Board({ project, toast, startWizard }) {
     }
   }
 
-  function dropOn(line, proc) {
+  function dropOn(line, proc, area) {
     return {
-      onDragOver: (e) => { e.preventDefault(); e.currentTarget.classList.add("dragover"); },
+      onDragOver: (e) => { e.preventDefault(); e.stopPropagation(); e.currentTarget.classList.add("dragover"); },
       onDragLeave: (e) => e.currentTarget.classList.remove("dragover"),
       onDrop: async (e) => {
         e.preventDefault();
+        e.stopPropagation();
         e.currentTarget.classList.remove("dragover");
         const tz = e.dataTransfer.getData("text/tz");
         if (!tz) return;
-        const area = proc.areas?.[0];
+        const target = area || proc.areas?.[0];
         try {
-          await api.placeTrolley(pid, tz, { lineCode: line.id, procCode: proc.code, areaCode: area?.id || "" });
+          await api.placeTrolley(pid, tz, { lineCode: line.id, procCode: proc.code, areaCode: target?.id || "" });
           await load();
-          toast(`${tz} 已手动标位 → ${line.name}·${proc.name}（来源→手动，已触发一次推送）`, "手动干预");
+          const where = [line.name, proc.name, target?.name].filter(Boolean).join("·");
+          toast(`${tz} 已手动标位 → ${where}（来源→手动，已触发一次推送）`, "手动干预");
         } catch (err) {
           toast(err.message);
         }
@@ -276,11 +418,16 @@ export default function Board({ project, toast, startWizard }) {
             const r = await api.batchPush(pid);
             toast(`已补推积压数据：${r.success}/${r.total} 条`, "批量补推");
           })}>手动批量推送</button>
-          <button className={"btn sm " + (test.on ? "danger" : "primary")} onClick={() => run(
-            () => test.on ? api.testStop(pid) : api.testStart(pid),
-            test.on ? "测试模式已停止，已生成数据保留（可点「清除测试数据」清理）" : `测试模式已启动：每 ${test.advLabel || "6 秒"} 推进一个工序`,
-            "测试模式"
-          )}>{test.on ? "■ 停止测试" : "▶ 测试"}</button>
+          <button className={"btn sm " + (test.on ? "danger" : "primary")} onClick={() => {
+            // #region agent log
+            fetch("http://127.0.0.1:7259/ingest/42287c2f-2aca-4b5e-a241-93e737ef8f41", { method: "POST", headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "537a1e" }, body: JSON.stringify({ sessionId: "537a1e", runId: "post-fix", hypothesisId: "A,B", location: "Board.jsx:testBtn", message: "test-click", data: { turningOff: !!test.on, cursor: getComputedStyle(document.body).cursor }, timestamp: Date.now() }) }).catch(() => {});
+            // #endregion
+            run(
+              () => test.on ? api.testStop(pid) : api.testStart(pid),
+              test.on ? "测试模式已停止，已生成数据保留（可点「清除测试数据」清理）" : `测试模式已启动：每 ${test.advLabel || "6 秒"} 推进一个工序`,
+              "测试模式"
+            );
+          }}>{test.on ? "■ 停止测试" : "▶ 测试"}</button>
           <select className="input" style={{ width: 172, height: 32 }} value={test.fast ? "fast" : "real"} onChange={(e) => run(() => api.testSpeed(pid, e.target.value === "fast"))}>
             <option value="fast">演示加速 6s / 3s</option>
             <option value="real">真实节奏 2min / 1min</option>
@@ -319,13 +466,24 @@ export default function Board({ project, toast, startWizard }) {
                     <span className="pc" style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--t3)" }}>{l.id} · {l.procs.length} 工序</span>
                   </div>
                   <div className="procs" style={{ gridTemplateColumns: `repeat(${Math.max(l.procs.length, 1)}, 1fr)` }}>
-                    {l.procs.map((g) => {
-                      const here = list.filter((t) => !t.unassigned && t.procCode === g.code);
+                    {l.procs.map((g, gi) => {
+                      const areas = g.areas || [];
                       return (
-                        <div className="proc" key={g.code} {...dropOn(l, g)}>
-                          <div className="ph"><span>{g.name}</span><span className="pc">{g.code}</span></div>
-                          {here.map((t) => <TzCard key={t.tz} t={t} />)}
-                          <div className="pc">{(g.areas || []).map((a) => a.id).join(" · ")}</div>
+                        <div className="proc" key={l.id + g.code + g.name + gi}>
+                          <div className="ph"><span>{g.name || "-"}</span></div>
+                          {areas.length ? areas.map((a) => {
+                            const here = list.filter((t) => !t.unassigned && t.procCode === g.code && t.areaCode === a.id && (!t.procName || t.procName === g.name));
+                            return (
+                              <div className="area-slot" key={a.id} {...dropOn(l, g, a)}>
+                                <div className="an">{String(a.name || "").trim() || "-"}</div>
+                                {here.map((t) => <TzCard key={t.tz} t={t} />)}
+                              </div>
+                            );
+                          }) : (
+                            <div className="area-slot empty" {...dropOn(l, g, null)}>
+                              <div className="an">拖到此处</div>
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -366,10 +524,15 @@ export default function Board({ project, toast, startWizard }) {
         <p className="sec-t">发往客户接口的全量记录：查看报文、修改（来源→手动并触发推送）、单条 P2 推送、导出 Excel。</p>
       </div>
       <div className="toolbar">
-        <input className="search" placeholder="搜索工序 / 台车 / 产线 / 区域 / 状态" value={qRec} onChange={(e) => setQRec(e.target.value)} />
-        <button className="btn sm" onClick={() => { setMerge((m) => !m); toast(merge ? "已关闭合并，展示全部记录" : "已启用合并：同台车同位置连续相同数据合并为一条"); }}>{merge ? "✓ 合并连续重复" : "合并连续重复"}</button>
+        <input className="search" placeholder="搜索工序 / 台车 / 产线 / 区域 / 状态" value={qRec} onChange={(e) => { setQRec(e.target.value); setPage(1); }} />
+        <label className="mini-note" style={{ margin: 0 }}>开始</label>
+        <input className="input" type="datetime-local" style={{ width: 196, height: 32 }} value={timeFrom} onChange={(e) => applyTime("from", e.target.value)} />
+        <label className="mini-note" style={{ margin: 0 }}>结束</label>
+        <input className="input" type="datetime-local" style={{ width: 196, height: 32 }} value={timeTo} onChange={(e) => applyTime("to", e.target.value)} />
+        <button className="btn sm" onClick={() => { setMerge((m) => !m); setPage(1); toast(merge ? "已关闭合并，展示全部记录" : "已启用合并：同台车同位置连续相同数据合并为一条"); }}>{merge ? "✓ 合并连续重复" : "合并连续重复"}</button>
+        <button className="btn sm" onClick={resetFilters}>重置</button>
         <div style={{ flex: 1 }} />
-        <button className="btn sm" onClick={() => downloadAuth(api.exportPushesUrl(pid, qRec, merge), `${pid}-push-records.xlsx`).then(() => toast("已导出当前筛选结果 push-records.xlsx")).catch((e) => toast(e.message))}>⤒ 导出 Excel</button>
+        <button className="btn sm" onClick={() => downloadAuth(api.exportPushesUrl(pid, qRec, merge, pushQueryExtra), `${pid}-push-records.xlsx`).then(() => toast("已导出当前筛选结果 push-records.xlsx")).catch((e) => toast(e.message))}>⤒ 导出 Excel</button>
       </div>
       <div className="card pad0">
         <div className="tb-wrap" style={{ maxHeight: 840 }}>
@@ -379,19 +542,19 @@ export default function Board({ project, toast, startWizard }) {
                 <th className="num">序号</th>
                 <th className="filterable">
                   识别工序
-                  <HeaderFilter value={colF.pc} onChange={(v) => setColF((f) => ({ ...f, pc: v }))} options={pcOpts} placeholder="全部工序" />
+                  <HeaderFilter value={colF.pc} onChange={(v) => applyColF("pc", v)} options={pcOpts} placeholder="全部工序" />
                 </th>
                 <th className="filterable">
                   台车
-                  <HeaderFilter value={colF.tz} onChange={(v) => setColF((f) => ({ ...f, tz: v }))} options={tzOpts} placeholder="全部台车" />
+                  <HeaderFilter value={colF.tz} onChange={(v) => applyColF("tz", v)} options={tzOpts} placeholder="全部台车" />
                 </th>
                 <th className="filterable">
                   产品线
-                  <HeaderFilter value={colF.line} onChange={(v) => setColF((f) => ({ ...f, line: v }))} options={lineOpts} placeholder="全部产品线" />
+                  <HeaderFilter value={colF.line} onChange={(v) => applyColF("line", v)} options={lineOpts} placeholder="全部产品线" />
                 </th>
                 <th className="filterable">
                   区域
-                  <HeaderFilter value={colF.area} onChange={(v) => setColF((f) => ({ ...f, area: v }))} options={areaOpts} placeholder="全部区域" />
+                  <HeaderFilter value={colF.area} onChange={(v) => applyColF("area", v)} options={areaOpts} placeholder="全部区域" />
                 </th>
                 <th>状态</th>
                 <th>识别时间</th>
@@ -406,7 +569,7 @@ export default function Board({ project, toast, startWizard }) {
                   <td>{r.pn} <span className="mono" style={{ color: "var(--t3)" }}>{r.pc}</span></td>
                   <td className="mono">{r.tz} <span style={{ fontFamily: "var(--sans)", color: "var(--t2)" }}>{r.seat}</span></td>
                   <td className="mono">{r.line}</td>
-                  <td className="mono">{r.area}</td>
+                  <td>{areaLabel(r)}</td>
                   <td><span className={"tag" + (r.state === "运动" ? " info" : "")}>{r.state}</span></td>
                   <td className="mono">{r.time}</td>
                   <td>
@@ -430,6 +593,13 @@ export default function Board({ project, toast, startWizard }) {
           </table>
           {!shownRecs.length ? <div className="empty">无匹配推送记录。</div> : null}
         </div>
+        {showPager ? (
+          <div className="pager">
+            <button className="btn sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>上一页</button>
+            <span>第 {page} / {pageCount} 页 · 共 {recTotal} 条</span>
+            <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>下一页</button>
+          </div>
+        ) : null}
       </div>
       {modal}
     </div>

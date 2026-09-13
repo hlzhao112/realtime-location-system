@@ -34,6 +34,21 @@ async function request(path, opts = {}) {
   return res;
 }
 
+function pushQuery(q, merge, extra = {}) {
+  const p = new URLSearchParams();
+  p.set("q", q || "");
+  p.set("merge", merge ? "true" : "false");
+  if (extra.page) p.set("page", String(extra.page));
+  if (extra.pageSize) p.set("pageSize", String(extra.pageSize));
+  if (extra.startTime) p.set("startTime", extra.startTime);
+  if (extra.endTime) p.set("endTime", extra.endTime);
+  if (extra.tz) p.set("tz", extra.tz);
+  if (extra.line) p.set("line", extra.line);
+  if (extra.area) p.set("area", extra.area);
+  if (extra.pc) p.set("pc", extra.pc);
+  return p.toString();
+}
+
 export const api = {
   login: (username, password) =>
     request("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
@@ -105,8 +120,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  pushes: (pid, q = "", merge = false) =>
-    request(`/api/v1/projects/${pid}/pushes?q=${encodeURIComponent(q)}&merge=${merge ? "true" : "false"}`),
+  pushes: (pid, q = "", merge = false, extra = {}) =>
+    request(`/api/v1/projects/${pid}/pushes?${pushQuery(q, merge, extra)}`),
   pushPayload: (pid, id) => request(`/api/v1/projects/${pid}/pushes/${id}/payload`),
   pushOne: (pid, id) => request(`/api/v1/projects/${pid}/pushes/${id}/push`, { method: "POST" }),
   editPush: (pid, id, body) =>
@@ -123,8 +138,8 @@ export const api = {
     request(`/api/v1/projects/${pid}/raw/devices/${encodeURIComponent(id)}?day=${encodeURIComponent(day)}`),
   logs: (pid, q = "") => request(`/api/v1/projects/${pid}/logs?q=${encodeURIComponent(q)}`),
   clearLogs: (pid) => request(`/api/v1/projects/${pid}/logs`, { method: "DELETE" }),
-  exportPushesUrl: (pid, q, merge) =>
-    `/api/v1/projects/${pid}/pushes/export?q=${encodeURIComponent(q || "")}&merge=${merge ? "true" : "false"}`,
+  exportPushesUrl: (pid, q, merge, extra = {}) =>
+    `/api/v1/projects/${pid}/pushes/export?${pushQuery(q, merge, extra)}`,
   exportLogsUrl: (pid, q) => `/api/v1/projects/${pid}/logs/export?q=${encodeURIComponent(q || "")}`,
 };
 

@@ -1,4 +1,4 @@
-const TOKEN_KEY = "omada_token";
+const TOKEN_KEY = "trolley_token";
 
 export function getToken() {
   return localStorage.getItem(TOKEN_KEY) || "";

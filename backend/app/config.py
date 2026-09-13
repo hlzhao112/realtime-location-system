@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_name: str = "trolley-tracking"
-    secret_key: str = "change-me-in-production-omada-2026"
+    secret_key: str = "change-me-in-production"
     access_token_expire_hours: int = 12
     admin_username: str = "admin"
     admin_password: str = "omada2026"

@@ -261,7 +261,7 @@ export default function App() {
 
 function Login({ onOk, toast }) {
   const [u, setU] = useState("admin");
-  const [p, setP] = useState("omada2026");
+  const [p, setP] = useState("");
   const [busy, setBusy] = useState(false);
   async function submit() {
     if (!u || !p) return toast("请填写账号和密码");
@@ -279,13 +279,13 @@ function Login({ onOk, toast }) {
   return (
     <div id="login">
       <div className="login-card">
-        <Logo sub="Trolley Tracking" />
+        <Logo />
         <h1>预制梁台车追踪与数据推送系统</h1>
         <p>管理员登录 · 首版仅管理员角色</p>
         <div className="field"><label>账号<span className="req">*</span></label><input className="input" value={u} onChange={(e) => setU(e.target.value)} /></div>
         <div className="field"><label>密码<span className="req">*</span></label><input className="input" type="password" value={p} onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} /></div>
         <button className="btn primary block" disabled={busy} onClick={submit}>登录</button>
-        <div className="mini-note" style={{ marginTop: 12 }}>默认账号 admin / omada2026，登录后进入项目看板。</div>
+        <div className="mini-note" style={{ marginTop: 12 }}>登录后进入项目看板。</div>
       </div>
     </div>
   );

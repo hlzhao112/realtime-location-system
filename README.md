@@ -1,6 +1,6 @@
 # 预制梁台车追踪系统
 
-工厂 RFID 台车定位后台。依据 PRD v0.5 与 Omada 原型实现：**登录、项目看板、三步向导、项目信息（基本信息 / 映射表 / 报文模板）、高吞吐设备上报与解析引擎**。
+工厂 RFID 台车定位后台。依据 PRD v0.5 实现：**登录、项目看板、三步向导、项目信息（基本信息 / 映射表 / 报文模板）、高吞吐设备上报与解析引擎**。
 
 本版不做页面、但已预留：**项目内主看板、原始数据监控、系统日志**。技术方案见 [docs/PROTOCOL.md](docs/PROTOCOL.md)。
 
@@ -22,7 +22,7 @@ npm run dev
 ```
 
 浏览器打开 http://localhost:5173  
-默认账号：`admin` / `omada2026`
+默认账号：`admin`，密码以环境变量 `ADMIN_PASSWORD` 为准（开发环境见 `.env.example`）。
 
 一键 Docker（含前后端）：
 
@@ -69,7 +69,7 @@ python scripts/simulate_report.py --token <token> --device LYG1 --epc "E28068940
 
 ```
 backend/     FastAPI + 解析引擎 + Redis Stream 接入
-frontend/    Omada 风格管理端
+frontend/    管理端
 templates/   三份现场 Excel 模板
 docs/        实现方案
 scripts/     上报模拟

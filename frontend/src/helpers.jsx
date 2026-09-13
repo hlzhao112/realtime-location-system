@@ -146,10 +146,10 @@ export function Logo({ sub }) {
   return (
     <div className="brand-logo">
       <svg className="mark" viewBox="0 0 24 24" aria-hidden="true">
-        <circle cx="12" cy="12" r="10" fill="none" stroke="#00A870" strokeWidth="2" />
-        <path d="M7 12.6l3.2 3.2L17 9" fill="none" stroke="#00A870" strokeWidth="2" strokeLinecap="round" />
+        <path d="M12 21s7-6.2 7-11.2A7 7 0 0 0 5 9.8C5 14.8 12 21 12 21z" fill="none" stroke="#00A870" strokeWidth="2" />
+        <circle cx="12" cy="9.8" r="2.2" fill="none" stroke="#00A870" strokeWidth="2" />
       </svg>
-      Omada {sub ? <span className="sub">{sub}</span> : null}
+      预制梁台车追踪{sub ? <span className="sub">{sub}</span> : null}
     </div>
   );
 }

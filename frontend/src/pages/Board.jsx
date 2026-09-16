@@ -141,7 +141,7 @@ export default function Board({ project, toast, startWizard }) {
 
   const trolleys = board?.trolleys || [];
   const lines = project.lines || [];
-  const test = board?.test || { on: false, fast: true, tick: 0, made: 0, recs: 0 };
+  const test = board?.test || { on: false, fast: true, mode: "fast", tick: 0, made: 0, recs: 0 };
   const stats = board?.stats || { lines: 0, procs: 0, areas: 0, online: 0, stale: 0, total: 0 };
   const offlineMin = board?.offlineMin || Math.round((project.cfg?.offline || 0.5) * 60);
 
@@ -284,11 +284,20 @@ export default function Board({ project, toast, startWizard }) {
   async function pushRow(r) {
     if (pushingId != null) return;
     setPushingId(r.id);
+    // #region agent log
+    fetch("http://127.0.0.1:7277/ingest/5e8a966a-6491-48f9-aacb-578ada25c074", { method: "POST", headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "7c60c2" }, body: JSON.stringify({ sessionId: "7c60c2", runId: "post-fix", hypothesisId: "E", location: "Board.jsx:pushRow", message: "click-start", data: { rid: r.id, test: r.test, src: r.src }, timestamp: Date.now() }) }).catch(() => {});
+    // #endregion
     try {
       const res = await api.pushOne(pid, r.id);
+      // #region agent log
+      fetch("http://127.0.0.1:7277/ingest/5e8a966a-6491-48f9-aacb-578ada25c074", { method: "POST", headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "7c60c2" }, body: JSON.stringify({ sessionId: "7c60c2", runId: "pre-fix", hypothesisId: "A,D", location: "Board.jsx:pushRow", message: "push-reply", data: { rid: r.id, test: r.test, src: r.src, ok: res?.ok, code: res?.code, msg: res?.msg, httpStatus: res?.httpStatus, status: res?.status }, timestamp: Date.now() }) }).catch(() => {});
+      // #endregion
       await load();
       toast(replyText(res), res.ok ? "推送成功" : "推送失败", 6000);
     } catch (e) {
+      // #region agent log
+      fetch("http://127.0.0.1:7277/ingest/5e8a966a-6491-48f9-aacb-578ada25c074", { method: "POST", headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "7c60c2" }, body: JSON.stringify({ sessionId: "7c60c2", runId: "pre-fix", hypothesisId: "E,F", location: "Board.jsx:pushRow", message: "push-error", data: { rid: r.id, test: r.test, err: String(e && e.message || e) }, timestamp: Date.now() }) }).catch(() => {});
+      // #endregion
       toast(e.message, "推送失败", 6000);
     } finally {
       setPushingId(null);
@@ -424,13 +433,14 @@ export default function Board({ project, toast, startWizard }) {
             // #endregion
             run(
               () => test.on ? api.testStop(pid) : api.testStart(pid),
-              test.on ? "测试模式已停止，已生成数据保留（可点「清除测试数据」清理）" : `测试模式已启动：每 ${test.advLabel || "6 秒"} 推进一个工序`,
+              test.on ? "测试模式已停止，已生成数据保留（可点「清除测试数据」清理）" : "测试模式已启动：已打开自动推送，测试数据将上传客户接口；看板按推进节奏走动，台座每 10 分钟再续推一次",
               "测试模式"
             );
           }}>{test.on ? "■ 停止测试" : "▶ 测试"}</button>
-          <select className="input" style={{ width: 172, height: 32 }} value={test.fast ? "fast" : "real"} onChange={(e) => run(() => api.testSpeed(pid, e.target.value === "fast"))}>
-            <option value="fast">演示加速 6s / 3s</option>
-            <option value="real">真实节奏 2min / 1min</option>
+          <select className="input" style={{ width: 340, height: 32 }} value={test.mode || (test.fast ? "fast" : "real")} onChange={(e) => run(() => api.testSpeed(pid, e.target.value))}>
+            <option value="fast">演示加速 推进 6s / 台座推送 10 分钟</option>
+            <option value="real">真实节奏 推进 2min / 台座推送 10 分钟</option>
+            <option value="hour">慢速 推进 1 小时 / 台座推送 10 分钟</option>
           </select>
           {(test.made || test.recs) ? <button className="btn sm" onClick={confirmClear}>清除测试数据</button> : null}
         </div>
@@ -441,10 +451,10 @@ export default function Board({ project, toast, startWizard }) {
         <div className="testbar">
           <span className={"tag " + (test.on ? "info" : "")}>{test.on ? "● 测试模式运行中" : "○ 测试模式已停止"}</span>
           <span>推进节奏 <b>{test.advLabel}</b></span>
-          <span>保持推送 <b>{test.keepLabel}</b></span>
+          <span>台座推送 <b>{test.keepLabel}</b></span>
           <span>已推进 <b>{test.tick}</b> 轮</span>
           <span>测试记录 <b>{test.recs}</b> 条</span>
-          <span style={{ color: "var(--t3)" }}>规则：每台车按本产线工序顺序前进，走完回首工序；不跨产线；多区域随机选一个空闲区域；每区域仅一台车，被挤占者进「未分配」</span>
+          <span style={{ color: "var(--t3)" }}>规则：每台车从本产线第一道工序按序走到最后一道，不得跳过；走完回首工序；不跨产线；多区域随机选空闲区域；每区域仅一台车，被挤占者进「未分配」后仍按目标工序重入。测试台座每 10 分钟把当前位置推到客户接口。</span>
         </div>
       ) : null}
 

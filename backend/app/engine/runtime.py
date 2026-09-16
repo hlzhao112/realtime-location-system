@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import queue
 import random
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .customer import build_customer_payload, movement_status, post_customer, replace_identify_time, replace_sport_state
+from ..db import SessionLocal
 from ..models import LatestLocation, Line, Project, PushRecord, RawReport, SysLog, Trolley
 from ..services.normalize import norm_epc, pretty_epc
 from ..services.project_svc import load_project, write_log
 
 LOCK = threading.Lock()
+_DEFER_HTTP = False
+PENDING_OUTBOUND: list[int] = []
+OUTBOUND_Q: queue.Queue[int] = queue.Queue()
 
 
 def _dbg(message: str, data: dict, hid: str, loc: str) -> None:
@@ -108,13 +115,20 @@ def src_cn(source: str) -> str:
     return "手动" if source == "manual" else "自动"
 
 
+def adv_mode(p: Project) -> str:
+    mode = str(getattr(p, "test_adv_mode", None) or "").strip().lower()
+    if mode in {"fast", "real", "hour"}:
+        return mode
+    return "fast" if getattr(p, "test_fast", True) else "real"
+
+
 def adv_sec(p: Project) -> int:
-    return 6 if p.test_fast else 120
+    return {"fast": 6, "real": 120, "hour": 3600}.get(adv_mode(p), 6)
 
 
 def keep_sec(p: Project) -> int:
     if p.test_on:
-        return 3 if p.test_fast else 60
+        return 600
     return max(int(getattr(p, "keep_sec", None) or 600), 1)
 
 
@@ -128,14 +142,26 @@ def format_keep_interval(seconds: int) -> str:
 
 
 def adv_label(p: Project) -> str:
-    return "6 秒（演示加速，对应现场 2 分钟）" if p.test_fast else "2 分钟"
+    return {
+        "fast": "6 秒（演示加速，对应现场 2 分钟）",
+        "real": "2 分钟",
+        "hour": "1 小时",
+    }.get(adv_mode(p), "6 秒（演示加速，对应现场 2 分钟）")
 
 
 def keep_label(p: Project) -> str:
     if p.test_on:
-        return "3 秒（演示加速，对应现场 1 分钟）" if p.test_fast else "1 分钟"
+        return "10 分钟"
     return format_keep_interval(keep_sec(p))
 
+
+def normalize_test_adv_mode(mode: Optional[str] = None, fast: Optional[bool] = None) -> str:
+    m = str(mode or "").strip().lower()
+    if m in {"fast", "real", "hour"}:
+        return m
+    if fast is not None:
+        return "fast" if fast else "real"
+    return "fast"
 
 def offline_minutes(p: Project) -> float:
     return max(float(p.offline or 0.5), 0) * 60 or 30
@@ -170,6 +196,38 @@ def find_proc(line: Optional[Line], code: str):
         if proc.code == code:
             return proc
     return None
+
+
+def find_proc_named(line: Optional[Line], code: str, name: str = ""):
+    """同一产线允许工序编码重复，需用名称区分。"""
+    if not line:
+        return None
+    name = (name or "").strip()
+    if name:
+        for proc in line.procedures:
+            if proc.code == code and proc.name == name:
+                return proc
+    return find_proc(line, code)
+
+
+def next_proc(line: Optional[Line], code: str, name: str = ""):
+    procs = list(line.procedures) if line else []
+    if not procs:
+        return None
+    current = find_proc_named(line, code, name)
+    if current is None:
+        return procs[0]
+    return procs[(procs.index(current) + 1) % len(procs)]
+
+
+def pick_free_on_line(db: Session, project: Project, line, except_tz: str, start_proc=None):
+    """未分配台车只进入目标工序，不跳过中间工序；无空位则挤占该工序。"""
+    procs = list(line.procedures) if line else []
+    if not procs:
+        return None, None, None
+    proc = start_proc if start_proc in procs else procs[0]
+    area, evict = pick_area(db, project, line, proc, except_tz)
+    return proc, area, evict
 
 
 def find_area(proc, code: str):
@@ -210,15 +268,118 @@ def area_epc(area) -> str:
     return ""
 
 
-def build_payload(project: Project, trolley: Trolley, loc_like, identify_time: datetime, sport_state: str) -> dict:
-    return build_customer_payload(project, trolley, loc_like, identify_time, sport_state=sport_state)
+@contextmanager
+def defer_outbound():
+    global _DEFER_HTTP
+    prev = _DEFER_HTTP
+    _DEFER_HTTP = True
+    try:
+        yield
+    finally:
+        _DEFER_HTTP = prev
+
+
+def take_outbound() -> list[int]:
+    ids = PENDING_OUTBOUND[:]
+    PENDING_OUTBOUND.clear()
+    return ids
+
+
+def project_snap(project: Project) -> SimpleNamespace:
+    return SimpleNamespace(
+        pid=project.pid,
+        name=project.name,
+        app_id=project.app_id,
+        app_secret=project.app_secret,
+        token_url=project.token_url,
+        push_url=project.push_url,
+        retry=project.retry,
+    )
+
+
+def apply_deliver_result(db: Session, project: Project, rec: PushRecord, ok: bool, result: dict) -> tuple[bool, dict]:
+    attempts = max(1, int(getattr(project, "retry", None) or 3))
+    detail = result.get("msg") or "接口超时"
+    if result.get("code") is not None:
+        detail = f"code={result.get('code')} msg={detail}"
+    if ok:
+        rec.status = "success"
+        test_mark = "，测试记录" if rec.test else ""
+        write_log(db, project.id, "成功", f"台车 {rec.trolley_tz} 推送成功（来源:{rec.kind}{test_mark}，{detail}）")
+        return True, result
+    rec.status = "failed"
+    write_log(
+        db,
+        project.id,
+        "失败",
+        f"台车 {rec.trolley_tz} 推送失败（已重试{attempts}次）: {detail}",
+    )
+    return False, result
+
+
+def send_record(rec_id: int) -> bool:
+    """在全局锁外请求客户接口，避免测试批量推送卡住页面上的单条推送。"""
+    db = SessionLocal()
+    try:
+        with LOCK:
+            rec = db.get(PushRecord, rec_id)
+            if not rec or rec.status not in {"pending", "failed"}:
+                return False
+            project = db.get(Project, rec.project_id)
+            if not project:
+                return False
+            snap = project_snap(project)
+            payload = dict(rec.payload or {})
+            if rec.source != "manual" and not project.push_enabled:
+                rec.status = "pending"
+                db.commit()
+                return False
+            if not project.push_url:
+                rec.status = "success"
+                write_log(db, project.id, "成功", f"台车 {rec.trolley_tz} 推送成功（本地记成功，未配置客户推送 URL，来源:{rec.kind}）")
+                db.commit()
+                return True
+            if not project.token_url or not project.app_id or not project.app_secret:
+                rec.status = "failed"
+                write_log(db, project.id, "失败", f"台车 {rec.trolley_tz} 推送失败：Token配置不完整（需 AppID、AppSecret、Token URL）")
+                db.commit()
+                return False
+        ok, result = post_customer(snap, payload, attempts=2)
+        with LOCK:
+            rec = db.get(PushRecord, rec_id)
+            project = db.get(Project, rec.project_id) if rec else None
+            if not rec or not project:
+                return False
+            apply_deliver_result(db, project, rec, ok, result)
+            db.commit()
+            return ok
+    except Exception:
+        db.rollback()
+        return False
+    finally:
+        db.close()
+
+
+def enqueue_outbound(ids: Optional[list[int]] = None) -> None:
+    for rec_id in ids or []:
+        OUTBOUND_Q.put(rec_id)
+
+
+def flush_pending_outbound(ids: Optional[list[int]] = None) -> None:
+    enqueue_outbound(ids)
+
+
+def outbound_worker_loop() -> None:
+    while True:
+        rec_id = OUTBOUND_Q.get()
+        try:
+            send_record(rec_id)
+        except Exception:
+            pass
 
 
 def deliver(db: Session, project: Project, rec: PushRecord, force: bool = False) -> tuple[bool, dict]:
     auto = rec.source != "manual"
-    if rec.test:
-        rec.status = "success"
-        return True, {"code": None, "msg": "测试记录已生成本地，未外发客户接口"}
     if auto and not project.push_enabled and not force:
         rec.status = "pending"
         write_log(
@@ -236,23 +397,16 @@ def deliver(db: Session, project: Project, rec: PushRecord, force: bool = False)
         rec.status = "failed"
         write_log(db, project.id, "失败", f"台车 {rec.trolley_tz} 推送失败：Token配置不完整（需 AppID、AppSecret、Token URL）")
         return False, {"code": None, "msg": "Token配置不完整（需 AppID、AppSecret、Token URL）"}
-    ok, result = post_customer(project, rec.payload or {})
-    attempts = max(1, int(project.retry or 3))
-    detail = result.get("msg") or "接口超时"
-    if result.get("code") is not None:
-        detail = f"code={result.get('code')} msg={detail}"
-    if ok:
-        rec.status = "success"
-        write_log(db, project.id, "成功", f"台车 {rec.trolley_tz} 推送成功（来源:{rec.kind}，{detail}）")
-        return True, result
-    rec.status = "failed"
-    write_log(
-        db,
-        project.id,
-        "失败",
-        f"台车 {rec.trolley_tz} 推送失败（已重试{attempts}次）: {detail}",
-    )
-    return False, result
+    if _DEFER_HTTP and not force:
+        rec.status = "pending"
+        PENDING_OUTBOUND.append(rec.id)
+        return False, {"code": None, "msg": "已排队外发"}
+    ok, result = post_customer(project, rec.payload or {}, attempts=2)
+    return apply_deliver_result(db, project, rec, ok, result)
+
+
+def build_payload(project: Project, trolley: Trolley, loc_like, identify_time: datetime, sport_state: str) -> dict:
+    return build_customer_payload(project, trolley, loc_like, identify_time, sport_state=sport_state)
 
 
 def create_push(
@@ -306,6 +460,7 @@ def occupy_area(db: Session, project: Project, trolley: Trolley, loc: LatestLoca
                 LatestLocation.unassigned.is_(False),
                 LatestLocation.line_code == loc.line_code,
                 LatestLocation.proc_code == loc.proc_code,
+                LatestLocation.proc_name == loc.proc_name,
                 LatestLocation.area_code == loc.area_code,
                 LatestLocation.trolley_id != trolley.id,
             )
@@ -313,16 +468,14 @@ def occupy_area(db: Session, project: Project, trolley: Trolley, loc: LatestLoca
         .all()
     )
     line = find_line(project, loc.line_code)
-    procs = list(line.procedures) if line else []
-    codes = [x.code for x in procs]
-    nxt = ""
-    if loc.proc_code in codes:
-        nxt = codes[(codes.index(loc.proc_code) + 1) % len(codes)]
-    elif codes:
-        nxt = codes[0]
+    nxt_p = next_proc(line, loc.proc_code, loc.proc_name)
+    nxt = nxt_p.code if nxt_p else ""
+    nxt_name = nxt_p.name if nxt_p else ""
     for other, ot in others:
         other.unassigned = True
         other.retry_proc = nxt
+        other.proc_code = nxt or other.proc_code
+        other.proc_name = nxt_name or other.proc_name
         other.skip_tick = int(project.test_tick or 0)
         write_log(
             db,
@@ -347,6 +500,7 @@ def apply_place(
     write_raw: bool = False,
     hex_data: str = "",
     epc: str = "",
+    make_push: bool = True,
 ) -> LatestLocation:
     when = identify_time or now_utc()
     loc = loc_of(db, project, trolley)
@@ -379,7 +533,8 @@ def apply_place(
                 ts=when,
             )
         )
-    create_push(db, project, trolley, loc, kind, source, test, sport_state, when)
+    if make_push:
+        create_push(db, project, trolley, loc, kind, source, test, sport_state, when)
     return loc
 
 
@@ -402,8 +557,16 @@ def on_location_updated(db: Session, project: Project, trolley: Trolley, loc: La
     )
 
 
-def assigned_on(db: Session, project: Project, line_code: str, proc_code: str, area_code: str, except_tz: str):
-    rows = db.execute(
+def assigned_on(
+    db: Session,
+    project: Project,
+    line_code: str,
+    proc_code: str,
+    area_code: str,
+    except_tz: str,
+    proc_name: str = "",
+):
+    stmt = (
         select(LatestLocation, Trolley)
         .join(Trolley, Trolley.id == LatestLocation.trolley_id)
         .where(
@@ -414,8 +577,10 @@ def assigned_on(db: Session, project: Project, line_code: str, proc_code: str, a
             LatestLocation.area_code == area_code,
             Trolley.tz != except_tz,
         )
-    ).all()
-    return rows
+    )
+    if proc_name:
+        stmt = stmt.where(LatestLocation.proc_name == proc_name)
+    return db.execute(stmt).all()
 
 
 def pick_area(db: Session, project: Project, line, proc, except_tz: str):
@@ -425,7 +590,7 @@ def pick_area(db: Session, project: Project, line, proc, except_tz: str):
     free = []
     occupied = []
     for area in proc.areas:
-        rows = assigned_on(db, project, line.code, proc.code, area.code, except_tz)
+        rows = assigned_on(db, project, line.code, proc.code, area.code, except_tz, proc.name)
         if not rows:
             free.append(area)
         else:
@@ -440,13 +605,17 @@ def pick_area(db: Session, project: Project, line, proc, except_tz: str):
     return area, (loc, t)
 
 
-def mark_unassigned(loc: LatestLocation, line, retry_proc: str, skip_tick: int) -> None:
+def mark_unassigned(loc: LatestLocation, line, retry_proc: str, skip_tick: int, retry_name: str = "") -> None:
     loc.unassigned = True
     loc.area_code = ""
     loc.area_name = ""
     loc.line_code = line.code if line else loc.line_code
     loc.line_name = line.name if line else loc.line_name
     loc.retry_proc = retry_proc
+    if retry_proc:
+        loc.proc_code = retry_proc
+        if retry_name:
+            loc.proc_name = retry_name
     loc.skip_tick = skip_tick
     loc.source = "auto"
     loc.kind = "实时上报"
@@ -484,26 +653,30 @@ def start_test(db: Session, project: Project) -> dict:
             loc.source = "auto"
             loc.kind = "实时上报"
             loc.identify_time = now_utc()
+            loc.retry_proc = ""
             det.append(f"{t.tz} → {line.name}·{first.name}·{area.code}")
         else:
             loc.unassigned = True
             loc.retry_proc = first.code if first else ""
             loc.proc_code = first.code if first else ""
             loc.proc_name = first.name if first else ""
-            det.append(f"{t.tz} → {line.name}·未分配（首工序区域已占满）")
+            det.append(f"{t.tz} → {line.name}·未分配（首工序区域已占满，按序等待进入）")
         db.flush()
+
     project.test_on = True
     project.test_tick = 0
+    project.push_enabled = True
     now = now_utc()
     project.test_next_adv = now + timedelta(seconds=adv_sec(project))
-    project.test_next_keep = now + timedelta(seconds=keep_sec(project))
+    project.test_next_keep = now
     write_log(
         db,
         project.id,
         "信息",
-        f"测试模式启动：为 {len(trolleys)} 台车分配初始位置（按台车顺序平均分配到各产线）—— " + "；".join(det),
+        f"测试模式启动：已打开自动推送，测试数据将上传客户接口（工序推进 {adv_label(project)}，台座保持推送每 10 分钟）；为 {len(trolleys)} 台车分配初始位置（按台车顺序平均分配到各产线）—— "
+        + "；".join(det),
     )
-    _dbg("test-start", {"pid": project.pid, "trolleys": len(trolleys), "fast": bool(project.test_fast)}, "A,E", "runtime.py:start_test")
+    _dbg("test-start", {"pid": project.pid, "trolleys": len(trolleys), "mode": adv_mode(project)}, "A,E", "runtime.py:start_test")
     return {"ok": True, "detail": det}
 
 
@@ -534,8 +707,10 @@ def clear_test_data(db: Session, project: Project) -> dict:
     return {"ok": True, "pushes": n_push, "raw": n_raw}
 
 
-def set_test_speed(db: Session, project: Project, fast: bool) -> None:
-    project.test_fast = fast
+def set_test_speed(db: Session, project: Project, mode: Optional[str] = None, fast: Optional[bool] = None) -> None:
+    resolved = normalize_test_adv_mode(mode, fast)
+    project.test_adv_mode = resolved
+    project.test_fast = resolved == "fast"
     now = now_utc()
     if project.test_on:
         project.test_next_adv = now + timedelta(seconds=adv_sec(project))
@@ -561,24 +736,25 @@ def test_tick(db: Session, project: Project) -> None:
         if not line or not line.procedures:
             continue
         procs = list(line.procedures)
-        codes = [p.code for p in procs]
+        was_assigned = not loc.unassigned
         if loc.unassigned:
-            target_code = loc.retry_proc or (codes[0] if codes else "")
+            start = find_proc_named(line, loc.retry_proc or loc.proc_code, loc.proc_name) or procs[0]
+            proc, area, evict = pick_free_on_line(db, project, line, t.tz, start)
         else:
-            if loc.proc_code in codes:
-                target_code = codes[(codes.index(loc.proc_code) + 1) % len(codes)]
-            else:
-                target_code = codes[0]
-        proc = find_proc(line, target_code)
-        if not proc:
-            continue
-        area, evict = pick_area(db, project, line, proc, t.tz)
-        if not area:
+            proc = next_proc(line, loc.proc_code, loc.proc_name)
+            area, evict = pick_area(db, project, line, proc, t.tz) if proc else (None, None)
+        if not proc or not area:
             continue
         if evict:
             eloc, et = evict
-            nxt = codes[(codes.index(target_code) + 1) % len(codes)] if target_code in codes else (codes[0] if codes else "")
-            mark_unassigned(eloc, line, nxt, tick)
+            nxt = next_proc(line, proc.code, proc.name)
+            mark_unassigned(
+                eloc,
+                line,
+                nxt.code if nxt else "",
+                tick,
+                retry_name=nxt.name if nxt else "",
+            )
             write_log(
                 db,
                 project.id,
@@ -586,7 +762,7 @@ def test_tick(db: Session, project: Project) -> None:
                 f"区域独占冲突：{t.tz} 进入 {proc.name}·{area.code}，原台车 {et.tz} 被挤出至「未分配」（下一轮重试进入下一工序）",
             )
             db.flush()
-        loop = (not loc.unassigned) and loc.proc_code in codes and target_code == codes[0] and len(codes) > 1
+        loop = was_assigned and proc is procs[0] and len(procs) > 1
         epc = area_epc(area)
         apply_place(
             db,
@@ -602,6 +778,7 @@ def test_tick(db: Session, project: Project) -> None:
             write_raw=True,
             hex_data=_simulate_hex(tick, epc),
             epc=epc,
+            make_push=True,
         )
         n += 1
         if loop:
@@ -612,7 +789,8 @@ def test_tick(db: Session, project: Project) -> None:
                 f"台车 {t.tz} 已走完 {line.name} 全部工序，回到首工序 {procs[0].name} 重新开始（不跨产线）",
             )
     if n:
-        write_log(db, project.id, "信息", f"测试推进第 {tick} 轮：更新 {n} 台车位置并生成本地记录")
+        dest = "并排队上传客户接口" if project.push_enabled else "仅保存在本地（自动推送已停止）"
+        write_log(db, project.id, "信息", f"测试推进第 {tick} 轮：更新 {n} 台车位置，{dest}")
         _dbg("test-tick", {"pid": project.pid, "tick": tick, "n": n}, "F", "runtime.py:test_tick")
 
 
@@ -624,9 +802,13 @@ def keep_tick(db: Session, project: Project, test: bool) -> None:
         if loc.unassigned or not loc.area_code:
             continue
         last = last_push(db, project.id, t.tz, test=bool(test))
+        state_cn = movement_status(loc.identify_time)
+        if test:
+            create_push(db, project, t, loc, "保持推送", "auto", True, state_cn, now)
+            n += 1
+            continue
         if not last:
             continue
-        state_cn = movement_status(loc.identify_time)
         rec = PushRecord(
             project_id=project.id,
             trolley_tz=last.trolley_tz,
@@ -656,7 +838,11 @@ def keep_tick(db: Session, project: Project, test: bool) -> None:
             db,
             project.id,
             "成功",
-            f"定时保持推送：位置未变，复制上一条记录、更新识别时间与运动状态续推 {n} 条（间隔 {keep_label(project)}）",
+            (
+                f"测试台座推送：按当前看板位置向客户接口上报 {n} 条（间隔 {keep_label(project)}）"
+                if test
+                else f"定时保持推送：位置未变，复制上一条记录、更新识别时间与运动状态续推 {n} 条（间隔 {keep_label(project)}）"
+            ),
         )
         _dbg("keep-tick", {"pid": project.pid, "n": n, "test": bool(test)}, "F", "runtime.py:keep_tick")
 
@@ -747,7 +933,7 @@ def edit_push(db: Session, project: Project, rec_id: int, proc_code: str, line_c
     return {"ok": True, "id": newest.id if newest else None}
 
 
-def push_one(db: Session, project: Project, rec_id: int) -> dict:
+def push_one_prepare(db: Session, project: Project, rec_id: int) -> dict:
     rec = db.get(PushRecord, rec_id)
     if not rec or rec.project_id != project.id:
         raise ValueError("推送记录不存在")
@@ -780,12 +966,25 @@ def push_one(db: Session, project: Project, rec_id: int) -> dict:
     )
     db.add(newest)
     db.flush()
-    ok, result = deliver(db, project, newest, force=True)
+    return {
+        "id": newest.id,
+        "src_id": rec.id,
+        "state_cn": state_cn,
+        "payload": dict(newest.payload or {}),
+        "snap": project_snap(project),
+    }
+
+
+def push_one_finish(db: Session, project: Project, prepared: dict, ok: bool, result: dict) -> dict:
+    newest = db.get(PushRecord, prepared["id"])
+    if not newest:
+        raise ValueError("推送记录不存在")
+    apply_deliver_result(db, project, newest, ok, result)
     write_log(
         db,
         project.id,
         "成功" if ok else "失败",
-        f"手动推送记录 {rec.id}：新增序号 {newest.id}（{state_cn}）",
+        f"手动推送记录 {prepared['src_id']}：新增序号 {newest.id}（{prepared['state_cn']}）",
     )
     return {
         "ok": ok,
@@ -797,43 +996,69 @@ def push_one(db: Session, project: Project, rec_id: int) -> dict:
     }
 
 
-def batch_push(db: Session, project: Project) -> dict:
+def push_one(db: Session, project: Project, rec_id: int) -> dict:
+    prepared = push_one_prepare(db, project, rec_id)
+    ok, result = post_customer(prepared["snap"], prepared["payload"], attempts=2)
+    return push_one_finish(db, project, prepared, ok, result)
+
+
+def batch_pending_ids(db: Session, project: Project) -> list[int]:
     limit = max(int(project.batch or 20), 1)
     rows = (
         db.scalars(
             select(PushRecord)
-            .where(PushRecord.project_id == project.id, PushRecord.status == "pending", PushRecord.test.is_(False))
+            .where(PushRecord.project_id == project.id, PushRecord.status == "pending")
             .order_by(PushRecord.id.asc())
             .limit(limit)
         )
         .all()
     )
+    return [r.id for r in rows]
+
+
+def batch_push(db: Session, project: Project) -> dict:
+    ids = batch_pending_ids(db, project)
     ok = 0
-    for rec in rows:
+    for rec_id in ids:
+        rec = db.get(PushRecord, rec_id)
+        if not rec:
+            continue
         success, _ = deliver(db, project, rec, force=True)
         if success:
             ok += 1
-    write_log(db, project.id, "成功" if ok == len(rows) else "信息", f"批量推送完成，成功 {ok}/{len(rows)} 台，来源:manual")
-    return {"ok": True, "success": ok, "total": len(rows)}
+    write_log(db, project.id, "成功" if ok == len(ids) else "信息", f"批量推送完成，成功 {ok}/{len(ids)} 台，来源:manual")
+    return {"ok": True, "success": ok, "total": len(ids)}
 
 
 def set_flags(db: Session, project: Project, push: Optional[bool] = None, monitor: Optional[bool] = None) -> None:
     if push is not None:
         project.push_enabled = push
-        write_log(db, project.id, "信息", "自动推送已开启" if push else "自动推送已停止，期间数据将积压待批量补推")
+        write_log(db, project.id, "信息", "自动推送已开启，测试/正式记录将上传客户接口" if push else "自动推送已停止，期间数据将积压待批量补推")
+        if push:
+            pending = (
+                db.scalars(
+                    select(PushRecord.id)
+                    .where(PushRecord.project_id == project.id, PushRecord.status == "pending")
+                    .order_by(PushRecord.id.asc())
+                    .limit(200)
+                )
+                .all()
+            )
+            enqueue_outbound(list(pending))
     if monitor is not None:
         project.monitor_enabled = monitor
         write_log(db, project.id, "信息", "文件夹监测已启动" if monitor else "文件夹监测已停止")
 
 
 def merge_rows(rows: list[PushRecord]) -> list[PushRecord]:
-    seen = set()
-    out = []
+    """同台车同位置连续相同记录合并为一条（保留每段连续中最新的那条）。"""
+    out: list[PushRecord] = []
+    prev: Optional[str] = None
     for r in rows:
-        key = f"{r.trolley_tz}|{r.area_code}|{r.proc_code}"
-        if key in seen:
+        key = f"{r.trolley_tz}|{r.line_code}|{r.proc_code}|{r.area_code}"
+        if key == prev:
             continue
-        seen.add(key)
+        prev = key
         out.append(r)
     return out
 
@@ -982,7 +1207,8 @@ def board_payload(db: Session, project: Project) -> dict:
         },
         "test": {
             "on": project.test_on,
-            "fast": project.test_fast,
+            "fast": adv_mode(project) == "fast",
+            "mode": adv_mode(project),
             "tick": project.test_tick or 0,
             "made": project.test_made or 0,
             "recs": int(test_recs),
@@ -1138,15 +1364,16 @@ def tick_all(db: Session) -> bool:
             continue
         did += 1
         dirty = True
-        if due_adv:
-            test_tick(db, p)
-            p.test_next_adv = now_utc() + timedelta(seconds=adv_sec(p))
-        if due_keep_test:
-            keep_tick(db, p, test=True)
-            p.test_next_keep = now_utc() + timedelta(seconds=keep_sec(p))
-        if due_keep_prod:
-            keep_tick(db, p, test=False)
-            p.keep_next = now_utc() + timedelta(seconds=keep_sec(p))
+        with defer_outbound():
+            if due_adv:
+                test_tick(db, p)
+                p.test_next_adv = now_utc() + timedelta(seconds=adv_sec(p))
+            if due_keep_test:
+                keep_tick(db, p, test=True)
+                p.test_next_keep = now_utc() + timedelta(seconds=keep_sec(p))
+            if due_keep_prod:
+                keep_tick(db, p, test=False)
+                p.keep_next = now_utc() + timedelta(seconds=keep_sec(p))
         _dbg(
             "tick-work",
             {

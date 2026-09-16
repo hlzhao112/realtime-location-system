@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..deps import get_current_user
 from ..engine import runtime as rt
+from ..engine.customer import post_customer
 from ..models import User
 from ..schemas import PlaceIn, PushEditIn, RuntimePatchIn, TestSpeedIn
 from ..services.excel_io import export_table
@@ -55,7 +56,7 @@ def patch_runtime(pid: str, body: RuntimePatchIn, db: Session = Depends(get_db),
         if body.push is not None or body.monitor is not None:
             rt.set_flags(db, p, push=body.push, monitor=body.monitor)
         if body.testFast is not None:
-            rt.set_test_speed(db, p, body.testFast)
+            rt.set_test_speed(db, p, fast=body.testFast)
         return rt.board_payload(db, p)
 
     return _locked(db, _do)
@@ -189,7 +190,109 @@ def get_payload(pid: str, rid: int, db: Session = Depends(get_db), _user: User =
 @router.post("/{pid}/pushes/{rid}/push")
 def push_one(pid: str, rid: int, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
     p = _must(db, pid)
-    return _locked(db, lambda: rt.push_one(db, p, rid))
+    # #region agent log
+    import json as _json
+    import time as _time
+    from pathlib import Path as _Path
+
+    try:
+        _p = _Path(__file__).resolve().parents[3] / "debug-7c60c2.log"
+        with _p.open("a", encoding="utf-8") as _f:
+            _f.write(
+                _json.dumps(
+                    {
+                        "sessionId": "7c60c2",
+                        "runId": "pre-fix",
+                        "hypothesisId": "E,F",
+                        "location": "api/runtime.py:push_one",
+                        "message": "click-enter",
+                        "data": {"pid": pid, "rid": rid},
+                        "timestamp": int(_time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
+    try:
+        with rt.LOCK:
+            prepared = rt.push_one_prepare(db, p, rid)
+            db.commit()
+        # #region agent log
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+
+        _pl = prepared.get("payload") or {}
+        try:
+            _p = _Path(__file__).resolve().parents[3] / "debug-7c60c2.log"
+            with _p.open("a", encoding="utf-8") as _f:
+                _f.write(
+                    _json.dumps(
+                        {
+                            "sessionId": "7c60c2",
+                            "runId": "pre-fix",
+                            "hypothesisId": "A,B",
+                            "location": "api/runtime.py:push_one",
+                            "message": "click-prepare",
+                            "data": {
+                                "rid": rid,
+                                "newId": prepared.get("id"),
+                                "pushUrlSet": bool(getattr(prepared.get("snap"), "push_url", "")),
+                                "isAutoImported": _pl.get("isAutoImported") if isinstance(_pl, dict) else None,
+                                "dataSource": _pl.get("dataSource") if isinstance(_pl, dict) else None,
+                                "dataIndex": _pl.get("dataIndex") if isinstance(_pl, dict) else None,
+                            },
+                            "timestamp": int(_time.time() * 1000),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
+        try:
+            ok, result = post_customer(prepared["snap"], prepared["payload"], attempts=1)
+        except Exception as exc:  # noqa: BLE001
+            ok, result = False, {"code": None, "msg": str(exc) or "客户接口请求失败"}
+        with rt.LOCK:
+            out = rt.push_one_finish(db, p, prepared, ok, result)
+            db.flush()
+        # #region agent log
+        try:
+            _p = _Path(__file__).resolve().parents[3] / "debug-7c60c2.log"
+            with _p.open("a", encoding="utf-8") as _f:
+                _f.write(
+                    _json.dumps(
+                        {
+                            "sessionId": "7c60c2",
+                            "runId": "post-fix",
+                            "hypothesisId": "D,E",
+                            "location": "api/runtime.py:push_one",
+                            "message": "click-result",
+                            "data": {
+                                "rid": rid,
+                                "ok": ok,
+                                "code": (result or {}).get("code"),
+                                "msg": str((result or {}).get("msg") or "")[:200],
+                            },
+                            "timestamp": int(_time.time() * 1000),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
+        return out
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(502, f"客户接口请求失败：{e}") from e
 
 
 @router.post("/{pid}/pushes/{rid}/edit")
@@ -200,7 +303,23 @@ def edit_push(pid: str, rid: int, body: PushEditIn, db: Session = Depends(get_db
 
 @router.post("/{pid}/pushes/batch")
 def batch_push(pid: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
-    return _locked(db, lambda: rt.batch_push(db, _must(db, pid)))
+    p = _must(db, pid)
+    try:
+        with rt.LOCK:
+            ids = rt.batch_pending_ids(db, p)
+            db.flush()
+        ok = 0
+        for rec_id in ids:
+            if rt.send_record(rec_id):
+                ok += 1
+        with rt.LOCK:
+            from ..services.project_svc import write_log
+
+            write_log(db, p.id, "成功" if ok == len(ids) else "信息", f"批量推送完成，成功 {ok}/{len(ids)} 台，来源:manual")
+            db.flush()
+        return {"ok": True, "success": ok, "total": len(ids)}
+    except Exception as e:
+        raise HTTPException(502, f"批量推送失败：{e}") from e
 
 
 @router.post("/{pid}/test/start")
@@ -224,7 +343,7 @@ def test_speed(pid: str, body: TestSpeedIn, db: Session = Depends(get_db), _user
     p = _must(db, pid)
 
     def _do():
-        rt.set_test_speed(db, p, body.fast)
+        rt.set_test_speed(db, p, mode=body.mode, fast=body.fast)
         return rt.board_payload(db, p)
 
     return _locked(db, _do)

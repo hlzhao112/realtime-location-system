@@ -31,7 +31,7 @@ DEFAULT_TPL = """{
   "projectId": "${projectId}",
   "serverUrl": "${serverUrl}",
   "dataIndex": 0,
-  "isAutoImported": false
+  "isAutoImported": true
 }"""
 
 
@@ -312,4 +312,7 @@ class PushEditIn(BaseModel):
 
 
 class TestSpeedIn(BaseModel):
-    fast: bool = True
+    """测试推进节奏。优先 mode：fast / real / hour；兼容旧字段 fast。"""
+
+    mode: Optional[str] = None
+    fast: Optional[bool] = None

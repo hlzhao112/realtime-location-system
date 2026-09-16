@@ -41,7 +41,7 @@ export const FIELD_TPL_VALUE = {
   projectId: '"${projectId}"',
   serverUrl: '"${serverUrl}"',
   dataIndex: "0",
-  isAutoImported: "false",
+  isAutoImported: "true",
 };
 export const DEFAULT_TPL = `{
   "dataSource": 1,
@@ -54,7 +54,7 @@ export const DEFAULT_TPL = `{
   "projectId": "\${projectId}",
   "serverUrl": "\${serverUrl}",
   "dataIndex": 0,
-  "isAutoImported": false
+  "isAutoImported": true
 }`;
 
 export function blankProject() {

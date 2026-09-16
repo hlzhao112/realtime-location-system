@@ -18,7 +18,42 @@ PLACEHOLDER = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
 MOVEMENT_THRESHOLD = 20 * 60
 TOKEN_CACHE: dict[str, tuple[str, float]] = {}
 TOKEN_LOCK = threading.RLock()
-HTTP = httpx.Client(timeout=httpx.Timeout(12.0, connect=5.0))
+CONNECT_TIMEOUT = 4.0
+READ_TIMEOUT = 8.0
+
+
+def http_post(url: str, *, json: Any = None, headers: Optional[dict] = None, timeout: float = READ_TIMEOUT):
+    """每次独立建连，避免后台线程与点击推送共用 Client 导致卡死。"""
+    t = timeout if isinstance(timeout, httpx.Timeout) else httpx.Timeout(timeout, connect=CONNECT_TIMEOUT)
+    with httpx.Client(timeout=t) as client:
+        return client.post(url, json=json, headers=headers)
+
+
+def _dlog(hid: str, loc: str, message: str, data: dict) -> None:
+    # #region agent log
+    from pathlib import Path
+
+    try:
+        p = Path(__file__).resolve().parents[3] / "debug-7c60c2.log"
+        with p.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "sessionId": "7c60c2",
+                        "runId": "pre-fix",
+                        "hypothesisId": hid,
+                        "location": loc,
+                        "message": message,
+                        "data": data,
+                        "timestamp": int(time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
 
 
 def _now() -> datetime:
@@ -142,7 +177,7 @@ def payload_context(project: Project, trolley, loc_like, identify_time: Any, spo
         "projectId": project.name or "",
         "dataSource": 1,
         "dataIndex": 0,
-        "isAutoImported": False,
+        "isAutoImported": True,
     }
 
 
@@ -157,7 +192,10 @@ def build_customer_payload(project: Project, trolley, loc_like, identify_time: A
         template = raw
     if not isinstance(template, dict):
         raise ValueError("报文模板必须是JSON对象")
-    return render_template(template, payload_context(project, trolley, loc_like, identify_time, sport_state=sport_state))
+    payload = render_template(template, payload_context(project, trolley, loc_like, identify_time, sport_state=sport_state))
+    if isinstance(payload, dict):
+        payload["isAutoImported"] = True
+    return payload
 
 
 def invalidate_token(pid: str) -> None:
@@ -174,14 +212,14 @@ def get_customer_token(project: Project, force_refresh: bool = False) -> tuple[O
         cached = TOKEN_CACHE.get(pid)
         if cached and not force_refresh and cached[1] > now:
             return cached[0], ""
-    attempts = max(1, int(project.retry or 3))
+    attempts = min(2, max(1, int(project.retry or 3)))
     last_error = ""
     for attempt in range(attempts):
         try:
-            response = HTTP.post(
+            response = http_post(
                 project.token_url,
                 json={"appId": project.app_id, "appSecret": project.app_secret},
-                timeout=10.0,
+                timeout=5.0,
             )
             try:
                 data = response.json()
@@ -218,24 +256,48 @@ def _reply_from_body(data: Any, http_status: Optional[int] = None) -> dict:
     }
 
 
-def post_customer(project: Project, payload: dict, force_refresh: bool = False) -> tuple[bool, dict]:
+def post_customer(project: Project, payload: dict, force_refresh: bool = False, attempts: Optional[int] = None) -> tuple[bool, dict]:
     """POST 客户推送 URL。成功条件与旧系统一致：HTTP 2xx 且 body.code == 200。"""
     if not project.push_url:
+        # #region agent log
+        _dlog("A", "customer.py:post_customer", "skip-no-push-url", {"pid": getattr(project, "pid", "")})
+        # #endregion
         return False, {"code": None, "msg": "未配置客户推送 URL"}
-    attempts = max(1, int(project.retry or 3))
+    attempts = min(2, max(1, int(project.retry or 3) if attempts is None else attempts))
     last: dict = {"code": None, "msg": ""}
     need_refresh = force_refresh
     for attempt in range(attempts):
         token, token_error = get_customer_token(project, force_refresh=need_refresh or attempt > 0 and "401" in str(last.get("msg") or ""))
         if not token:
             last = {"code": None, "msg": token_error or "Token获取失败"}
+            # #region agent log
+            _dlog("A", "customer.py:post_customer", "token-fail", {"pid": getattr(project, "pid", ""), "err": (token_error or "")[:200]})
+            # #endregion
             break
+        body = dict(payload or {})
+        body["isAutoImported"] = True
+        # #region agent log
+        _dlog(
+            "B,C",
+            "customer.py:post_customer",
+            "before-http",
+            {
+                "pid": getattr(project, "pid", ""),
+                "pushHost": (project.push_url or "").split("?")[0][:180],
+                "isAutoImported": body.get("isAutoImported"),
+                "isAutoType": type(body.get("isAutoImported")).__name__,
+                "dataSource": body.get("dataSource"),
+                "dataIndex": body.get("dataIndex"),
+                "keys": list(body.keys())[:20],
+            },
+        )
+        # #endregion
         try:
-            response = HTTP.post(
+            response = http_post(
                 project.push_url,
-                json=payload,
+                json=body,
                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                timeout=12.0,
+                timeout=READ_TIMEOUT,
             )
             try:
                 result = response.json()
@@ -244,8 +306,37 @@ def post_customer(project: Project, payload: dict, force_refresh: bool = False) 
             last = _reply_from_body(result, response.status_code)
             if not last["msg"]:
                 last["msg"] = f"HTTP {response.status_code}"
+            # #region agent log
+            _dlog(
+                "C,D",
+                "customer.py:post_customer",
+                "after-http",
+                {
+                    "httpStatus": response.status_code,
+                    "ok2xx": bool(response.is_success),
+                    "code": result.get("code") if isinstance(result, dict) else None,
+                    "msg": (last.get("msg") or "")[:200],
+                    "isAutoImportedSent": body.get("isAutoImported"),
+                    "dataSourceSent": body.get("dataSource"),
+                },
+            )
+            # #endregion
             if response.is_success and (result.get("code") == 200 if isinstance(result, dict) else False):
                 return True, last
+            # #region agent log
+            _dlog(
+                "E,G",
+                "customer.py:post_customer",
+                "customer-reject",
+                {
+                    "procedureCode": body.get("procedureCode"),
+                    "areaCode": body.get("areaCode"),
+                    "beamAssetsCode": body.get("beamAssetsCode"),
+                    "code": last.get("code"),
+                    "msg": (last.get("msg") or "")[:200],
+                },
+            )
+            # #endregion
             if response.status_code == 401 or (isinstance(result, dict) and result.get("code") == 401):
                 invalidate_token(project.pid)
                 need_refresh = True

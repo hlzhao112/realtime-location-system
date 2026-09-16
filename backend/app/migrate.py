@@ -9,6 +9,7 @@ EXTRA = {
     "projects": [
         ("test_on", "BOOLEAN DEFAULT 0"),
         ("test_fast", "BOOLEAN DEFAULT 1"),
+        ("test_adv_mode", "VARCHAR(16) DEFAULT 'fast'"),
         ("test_tick", "INTEGER DEFAULT 0"),
         ("test_made", "INTEGER DEFAULT 0"),
         ("test_next_adv", "TIMESTAMP"),
@@ -49,8 +50,26 @@ def migrate(engine: Engine) -> None:
                 if name in existing:
                     continue
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+        _migrate_test_adv_mode(conn, insp)
         _migrate_proc_unique(conn, insp)
         _migrate_default_templates(conn)
+
+
+def _migrate_test_adv_mode(conn, insp) -> None:
+    """从旧布尔 test_fast 回填 test_adv_mode；保留已选的 hour。"""
+    if "projects" not in insp.get_table_names():
+        return
+    try:
+        conn.execute(
+            text(
+                "UPDATE projects SET test_adv_mode = CASE "
+                "WHEN test_adv_mode = 'hour' THEN 'hour' "
+                "WHEN COALESCE(test_fast, 1) IN (1, '1', 'true', 'True') THEN 'fast' "
+                "ELSE 'real' END"
+            )
+        )
+    except Exception:
+        pass
 
 
 def _migrate_proc_unique(conn, insp) -> None:
@@ -130,6 +149,9 @@ def _migrate_default_templates(conn) -> None:
                     changed = True
             if obj.get("projectId") == "":
                 obj["projectId"] = "${projectId}"
+                changed = True
+            if obj.get("isAutoImported") is False:
+                obj["isAutoImported"] = True
                 changed = True
 
         fields_raw = row["tpl_fields"]

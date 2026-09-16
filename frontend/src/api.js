@@ -10,28 +10,41 @@ export function setToken(t) {
 }
 
 async function request(path, opts = {}) {
-  const headers = { ...(opts.headers || {}) };
+  const { timeoutMs, ...fetchOpts } = opts;
+  const headers = { ...(fetchOpts.headers || {}) };
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
-  if (opts.body && !(opts.body instanceof FormData) && !headers["Content-Type"]) {
+  if (fetchOpts.body && !(fetchOpts.body instanceof FormData) && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
-  const res = await fetch(path, { ...opts, headers });
-  if (res.status === 401) {
-    setToken("");
-    throw new Error("未登录或会话已过期");
-  }
-  const ct = res.headers.get("content-type") || "";
-  if (ct.includes("application/json")) {
-    const data = await res.json();
-    if (!res.ok) {
-      const msg = data.detail || data.message || res.statusText;
-      throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  const ctrl = timeoutMs ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(path, { ...fetchOpts, headers, signal: ctrl?.signal });
+    if (res.status === 401) {
+      setToken("");
+      throw new Error("未登录或会话已过期");
     }
-    return data;
+    const ct = res.headers.get("content-type") || "";
+    if (ct.includes("application/json")) {
+      const data = await res.json();
+      if (!res.ok) {
+        const msg = data.detail || data.message || res.statusText;
+        throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+      }
+      return data;
+    }
+    if (!res.ok) {
+      if (res.status >= 500) throw new Error("推送服务超时或内部错误，请稍后重试");
+      throw new Error((await res.text()) || res.statusText);
+    }
+    return res;
+  } catch (e) {
+    if (e?.name === "AbortError") throw new Error("客户接口超时，请检查推送 URL / 网络后重试");
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  if (!res.ok) throw new Error(await res.text());
-  return res;
 }
 
 function pushQuery(q, merge, extra = {}) {
@@ -123,15 +136,20 @@ export const api = {
   pushes: (pid, q = "", merge = false, extra = {}) =>
     request(`/api/v1/projects/${pid}/pushes?${pushQuery(q, merge, extra)}`),
   pushPayload: (pid, id) => request(`/api/v1/projects/${pid}/pushes/${id}/payload`),
-  pushOne: (pid, id) => request(`/api/v1/projects/${pid}/pushes/${id}/push`, { method: "POST" }),
+  pushOne: (pid, id) => {
+    // #region agent log
+    fetch("http://127.0.0.1:7277/ingest/5e8a966a-6491-48f9-aacb-578ada25c074", { method: "POST", headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "7c60c2" }, body: JSON.stringify({ sessionId: "7c60c2", runId: "post-fix", hypothesisId: "E", location: "api.js:pushOne", message: "api-push-start", data: { pid, id }, timestamp: Date.now() }) }).catch(() => {});
+    // #endregion
+    return request(`/api/v1/projects/${pid}/pushes/${id}/push`, { method: "POST", timeoutMs: 25000 });
+  },
   editPush: (pid, id, body) =>
     request(`/api/v1/projects/${pid}/pushes/${id}/edit`, { method: "POST", body: JSON.stringify(body) }),
   batchPush: (pid) => request(`/api/v1/projects/${pid}/pushes/batch`, { method: "POST" }),
   testStart: (pid) => request(`/api/v1/projects/${pid}/test/start`, { method: "POST" }),
   testStop: (pid) => request(`/api/v1/projects/${pid}/test/stop`, { method: "POST" }),
   testClear: (pid) => request(`/api/v1/projects/${pid}/test/clear`, { method: "POST" }),
-  testSpeed: (pid, fast) =>
-    request(`/api/v1/projects/${pid}/test/speed`, { method: "POST", body: JSON.stringify({ fast }) }),
+  testSpeed: (pid, mode) =>
+    request(`/api/v1/projects/${pid}/test/speed`, { method: "POST", body: JSON.stringify({ mode }) }),
   raw: (pid, day = "", q = "") =>
     request(`/api/v1/projects/${pid}/raw?day=${encodeURIComponent(day)}&q=${encodeURIComponent(q)}`),
   rawDevice: (pid, id, day = "") =>

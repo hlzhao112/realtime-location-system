@@ -57,6 +57,7 @@ class Project(Base):
     monitor_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     test_on: Mapped[bool] = mapped_column(Boolean, default=False)
     test_fast: Mapped[bool] = mapped_column(Boolean, default=True)
+    test_adv_mode: Mapped[str] = mapped_column(String(16), default="fast")
     test_tick: Mapped[int] = mapped_column(Integer, default=0)
     test_made: Mapped[int] = mapped_column(Integer, default=0)
     test_next_adv: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

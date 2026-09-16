@@ -14,6 +14,42 @@ from .seed import seed_admin
 
 app = FastAPI(title="预制梁台车追踪系统", version="1.0.0")
 settings = get_settings()
+
+
+@app.middleware("http")
+async def _debug_http(request, call_next):
+    # #region agent log
+    try:
+        import json as _json
+        import time as _time
+        from pathlib import Path as _Path
+
+        _path = str(request.url.path)
+        if request.method != "POST" or "/pushes/" not in _path or not _path.endswith("/push"):
+            return await call_next(request)
+        _p = _Path(__file__).resolve().parents[2] / "debug-7c60c2.log"
+        with _p.open("a", encoding="utf-8") as _f:
+            _f.write(
+                _json.dumps(
+                    {
+                        "sessionId": "7c60c2",
+                        "runId": "post-fix",
+                        "hypothesisId": "E",
+                        "location": "main.py:middleware",
+                        "message": "http-in",
+                        "data": {"method": request.method, "path": _path},
+                        "timestamp": int(_time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
+    return await call_next(request)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list + ["http://localhost:4173"],
@@ -43,14 +79,17 @@ def _worker_loop():
 
 
 def _runtime_loop():
-    from .engine.runtime import LOCK, tick_all
+    from .engine.runtime import LOCK, enqueue_outbound, take_outbound, tick_all
 
     while True:
+        outbound: list[int] = []
         try:
             db = SessionLocal()
             try:
                 with LOCK:
-                    if tick_all(db):
+                    dirty = tick_all(db)
+                    outbound = take_outbound()
+                    if dirty:
                         db.commit()
                     else:
                         db.rollback()
@@ -58,9 +97,16 @@ def _runtime_loop():
                 db.rollback()
             finally:
                 db.close()
+            enqueue_outbound(outbound)
         except Exception:
             pass
         time.sleep(0.5)
+
+
+def _outbound_loop():
+    from .engine.runtime import outbound_worker_loop
+
+    outbound_worker_loop()
 
 
 @app.on_event("startup")
@@ -77,6 +123,8 @@ def on_startup():
     t.start()
     r = threading.Thread(target=_runtime_loop, name="runtime-ticker", daemon=True)
     r.start()
+    p = threading.Thread(target=_outbound_loop, name="push-worker", daemon=True)
+    p.start()
 
 
 @app.get("/api/v1/health")

@@ -35,6 +35,10 @@ EXTRA = {
     "raw_reports": [
         ("test", "BOOLEAN DEFAULT 0"),
     ],
+    "areas": [
+        ("last_identify_time", "TIMESTAMP"),
+        ("last_tz", "VARCHAR(64) DEFAULT ''"),
+    ],
 }
 
 

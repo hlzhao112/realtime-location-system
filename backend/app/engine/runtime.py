@@ -239,6 +239,21 @@ def find_area(proc, code: str):
     return None
 
 
+def resolve_area(project: Project, line_code: str, proc_code: str, area_code: str, proc_name: str = ""):
+    line = find_line(project, line_code)
+    proc = find_proc_named(line, proc_code, proc_name) if line else None
+    return find_area(proc, area_code) if proc and area_code else None
+
+
+def touch_area_seen(area, when: Optional[datetime], tz: str = "") -> None:
+    """记录区域最后一次识别时间，台车离开后仍可在看板上展示间隔。"""
+    if not area or not when:
+        return
+    area.last_identify_time = when
+    if tz:
+        area.last_tz = tz
+
+
 def loc_of(db: Session, project: Project, trolley: Trolley) -> LatestLocation:
     loc = db.scalar(
         select(LatestLocation).where(
@@ -519,6 +534,7 @@ def apply_place(
     loc.identify_time = when
     if epc:
         loc.epc = pretty_epc(epc)
+    touch_area_seen(area, when, trolley.tz)
     db.flush()
     occupy_area(db, project, trolley, loc)
     if write_raw:
@@ -543,6 +559,9 @@ def on_location_updated(db: Session, project: Project, trolley: Trolley, loc: La
     loc.kind = loc.kind or "实时上报"
     loc.source = loc.source or "auto"
     loc.test = test
+    when = loc.identify_time or now_utc()
+    area = resolve_area(project, loc.line_code, loc.proc_code, loc.area_code, loc.proc_name)
+    touch_area_seen(area, when, trolley.tz)
     occupy_area(db, project, trolley, loc)
     create_push(
         db,
@@ -553,7 +572,7 @@ def on_location_updated(db: Session, project: Project, trolley: Trolley, loc: La
         loc.source or "auto",
         test,
         loc.sport_state,
-        loc.identify_time or now_utc(),
+        when,
     )
 
 
@@ -654,6 +673,7 @@ def start_test(db: Session, project: Project) -> dict:
             loc.kind = "实时上报"
             loc.identify_time = now_utc()
             loc.retry_proc = ""
+            touch_area_seen(area, loc.identify_time, t.tz)
             det.append(f"{t.tz} → {line.name}·{first.name}·{area.code}")
         else:
             loc.unassigned = True
@@ -803,6 +823,8 @@ def keep_tick(db: Session, project: Project, test: bool) -> None:
             continue
         last = last_push(db, project.id, t.tz, test=bool(test))
         state_cn = movement_status(loc.identify_time)
+        area = resolve_area(project, loc.line_code, loc.proc_code, loc.area_code, loc.proc_name)
+        touch_area_seen(area, now, t.tz)
         if test:
             create_push(db, project, t, loc, "保持推送", "auto", True, state_cn, now)
             n += 1
@@ -1176,6 +1198,11 @@ def board_payload(db: Session, project: Project) -> dict:
                 "areaCode": "" if unassigned else (loc.area_code if loc else ""),
                 "areaName": loc.area_name if loc else "",
                 "mins": mins if loc and loc.identify_time else None,
+                "agoSec": (
+                    max(0, int((now - aware(loc.identify_time)).total_seconds()))
+                    if loc and loc.identify_time
+                    else None
+                ),
                 "online": on,
                 "unassigned": unassigned,
                 "test": bool(loc.test) if loc else False,
@@ -1185,6 +1212,19 @@ def board_payload(db: Session, project: Project) -> dict:
                 "last": fmt_local(loc.identify_time) if loc else "—",
             }
         )
+    area_seen = {}
+    for line in project.lines:
+        for proc in line.procedures:
+            for area in proc.areas:
+                when = aware(getattr(area, "last_identify_time", None))
+                if not when:
+                    continue
+                key = f"{line.code}|{proc.code}|{proc.name}|{area.code}"
+                area_seen[key] = {
+                    "last": fmt_local(when),
+                    "agoSec": max(0, int((now - when).total_seconds())),
+                    "tz": getattr(area, "last_tz", None) or "",
+                }
     procs = sum(len(l.procedures) for l in project.lines)
     areas = sum(len(pr.areas) for l in project.lines for pr in l.procedures)
     test_recs = db.scalar(
@@ -1197,6 +1237,7 @@ def board_payload(db: Session, project: Project) -> dict:
         "ready": bool(project.lines and project.trolleys),
         "tplCustom": project.tpl_custom,
         "trolleys": cards,
+        "areaSeen": area_seen,
         "stats": {
             "lines": len(project.lines),
             "procs": procs,
@@ -1215,6 +1256,47 @@ def board_payload(db: Session, project: Project) -> dict:
             "advLabel": adv_label(project),
             "keepLabel": keep_label(project),
         },
+    }
+
+
+def resolve_raw_place(project: Project, db: Session, hex_data: str = "", epcs: Optional[list] = None) -> dict:
+    """用映射表把原始 HEX / EPC 解析为产线·工序·区域。"""
+    from ..services.cache import get_cache, lookup_epc
+    from .parse import extract_epcs
+
+    cache = get_cache(db, project)
+    candidates = extract_epcs(hex_data or "", [str(x) for x in (epcs or []) if x])
+    display = ""
+    hit = None
+    for e in candidates:
+        pretty = pretty_epc(e) or e
+        if not display:
+            display = pretty
+        found = lookup_epc(cache, e)
+        if found:
+            hit = found
+            display = pretty
+            break
+    if not display and epcs:
+        display = pretty_epc(str(epcs[-1])) or str(epcs[-1])
+    if not hit:
+        return {
+            "epc": display or "",
+            "lineCode": "",
+            "lineName": "",
+            "procCode": "",
+            "procName": "",
+            "areaCode": "",
+            "areaName": "",
+        }
+    return {
+        "epc": display or "",
+        "lineCode": hit.line_code,
+        "lineName": hit.line_name,
+        "procCode": hit.proc_code,
+        "procName": hit.proc_name,
+        "areaCode": hit.area_code,
+        "areaName": hit.area_name,
     }
 
 
@@ -1249,12 +1331,16 @@ def raw_payload(db: Session, project: Project, day: str = "", q: str = "") -> di
         if active:
             act += 1
         hex_data = last.hex_data if last else ""
-        epc = ""
-        if last and last.epcs:
-            epc = last.epcs[-1]
-        elif hex_data:
-            compact = norm_epc(hex_data)
-            epc = pretty_epc(compact[-24:] if len(compact) >= 24 else compact)
+        place = resolve_raw_place(project, db, hex_data, last.epcs if last else None) if last else {
+            "epc": "",
+            "lineCode": "",
+            "lineName": "",
+            "procCode": "",
+            "procName": "",
+            "areaCode": "",
+            "areaName": "",
+        }
+        epc = place.get("epc") or ""
         item = {
             "id": did,
             "tz": meta["tz"],
@@ -1262,11 +1348,32 @@ def raw_payload(db: Session, project: Project, day: str = "", q: str = "") -> di
             "on": active,
             "hex": hex_data,
             "epc": epc,
+            "lineCode": place.get("lineCode") or "",
+            "lineName": place.get("lineName") or "",
+            "procCode": place.get("procCode") or "",
+            "procName": place.get("procName") or "",
+            "areaCode": place.get("areaCode") or "",
+            "areaName": place.get("areaName") or "",
             "n": counts.get(did, 0),
             "last": fmt_local(ts, ms=True) if ts else "—",
             "test": bool(last.test) if last else False,
         }
-        if qn and qn not in (did + " " + (epc or "") + " " + hex_data).upper():
+        hay = " ".join(
+            [
+                did,
+                epc or "",
+                hex_data,
+                item["lineCode"],
+                item["lineName"],
+                item["procCode"],
+                item["procName"],
+                item["areaCode"],
+                item["areaName"],
+                meta["tz"],
+                meta["seat"],
+            ]
+        ).upper()
+        if qn and qn not in hay:
             continue
         cards.append(item)
     total = db.scalar(select(func.count(RawReport.id)).where(RawReport.project_id == project.id)) or 0
@@ -1299,17 +1406,37 @@ def raw_device(db: Session, project: Project, device_id: str, day: str = "") -> 
     trolley = next((t for t in project.trolleys if t.reader == device_id), None)
     items = []
     for i, r in enumerate(reversed(rows), start=1):
-        items.append({"no": i, "ts": fmt_local(r.ts, ms=True), "hex": r.hex_data, "test": bool(r.test)})
+        place = resolve_raw_place(project, db, r.hex_data or "", r.epcs)
+        items.append(
+            {
+                "no": i,
+                "ts": fmt_local(r.ts, ms=True),
+                "hex": r.hex_data,
+                "epc": place.get("epc") or "",
+                "lineCode": place.get("lineCode") or "",
+                "lineName": place.get("lineName") or "",
+                "procCode": place.get("procCode") or "",
+                "procName": place.get("procName") or "",
+                "areaCode": place.get("areaCode") or "",
+                "areaName": place.get("areaName") or "",
+                "test": bool(r.test),
+            }
+        )
     last = rows[0] if rows else None
-    epc = ""
-    if last and last.epcs:
-        epc = last.epcs[-1]
+    last_place = resolve_raw_place(project, db, last.hex_data or "", last.epcs) if last else {}
+    epc = last_place.get("epc") or ""
     return {
         "id": device_id,
         "tz": trolley.tz if trolley else "—",
         "seat": trolley.name if trolley else "未绑定台车",
         "on": bool(last and (now_utc() - aware(last.ts)) <= timedelta(minutes=offline_minutes(project))),
         "epc": epc,
+        "lineCode": last_place.get("lineCode") or "",
+        "lineName": last_place.get("lineName") or "",
+        "procCode": last_place.get("procCode") or "",
+        "procName": last_place.get("procName") or "",
+        "areaCode": last_place.get("areaCode") or "",
+        "areaName": last_place.get("areaName") or "",
         "n": len(items),
         "items": items,
     }

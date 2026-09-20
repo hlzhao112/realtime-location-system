@@ -23,6 +23,28 @@ function areaLabel(r) {
   return name || "-";
 }
 
+function formatAgo(sec) {
+  if (sec == null || sec === "") return "—";
+  const n = Math.max(0, Math.floor(Number(sec)));
+  if (!Number.isFinite(n)) return "—";
+  if (n < 60) return `${n} 秒`;
+  if (n < 3600) {
+    const m = Math.floor(n / 60);
+    const s = n % 60;
+    return s ? `${m} 分 ${s} 秒` : `${m} 分`;
+  }
+  const h = Math.floor(n / 3600);
+  const m = Math.floor((n % 3600) / 60);
+  return m ? `${h} 时 ${m} 分` : `${h} 时`;
+}
+
+function lastTimeShort(last) {
+  const text = String(last || "").trim();
+  if (!text || text === "—") return "—";
+  const m = text.match(/(\d{2}:\d{2}:\d{2})/);
+  return m ? m[1] : text;
+}
+
 function sortedOpts(map) {
   return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1], "zh"));
 }
@@ -140,6 +162,7 @@ export default function Board({ project, toast, startWizard }) {
   }, [load, toast, pid]);
 
   const trolleys = board?.trolleys || [];
+  const areaSeen = board?.areaSeen || {};
   const lines = project.lines || [];
   const test = board?.test || { on: false, fast: true, mode: "fast", tick: 0, made: 0, recs: 0 };
   const stats = board?.stats || { lines: 0, procs: 0, areas: 0, online: 0, stale: 0, total: 0 };
@@ -483,9 +506,30 @@ export default function Board({ project, toast, startWizard }) {
                           <div className="ph"><span>{g.name || "-"}</span></div>
                           {areas.length ? areas.map((a) => {
                             const here = list.filter((t) => !t.unassigned && t.procCode === g.code && t.areaCode === a.id && (!t.procName || t.procName === g.name));
+                            const occ = here[0];
+                            const seenKey = `${l.id}|${g.code}|${g.name || ""}|${a.id}`;
+                            const remembered = areaSeen[seenKey];
+                            const last = occ?.last || remembered?.last || "";
+                            const ago = occ
+                              ? (occ.agoSec != null ? occ.agoSec : (occ.mins != null ? occ.mins * 60 : null))
+                              : (remembered?.agoSec != null ? remembered.agoSec : null);
+                            const hasSeen = !!(last && last !== "—") || ago != null;
+                            const tipTz = occ?.tz || remembered?.tz || "";
                             return (
                               <div className="area-slot" key={a.id} {...dropOn(l, g, a)}>
-                                <div className="an">{String(a.name || "").trim() || "-"}</div>
+                                <div className="an">
+                                  <span className="an-name">{String(a.name || "").trim() || "-"}</span>
+                                  {hasSeen ? (
+                                    <span
+                                      className={"an-ago" + (occ && !occ.online ? " warn" : "") + (!occ ? " left" : "")}
+                                      title={`最后识别 ${last || "—"} · 距今 ${formatAgo(ago)}${tipTz ? ` · 台车 ${tipTz}` : ""}${occ ? "" : "（已离开）"}`}
+                                    >
+                                      {lastTimeShort(last)} · 间隔 {formatAgo(ago)}
+                                    </span>
+                                  ) : (
+                                    <span className="an-ago idle">空闲</span>
+                                  )}
+                                </div>
                                 {here.map((t) => <TzCard key={t.tz} t={t} />)}
                               </div>
                             );

@@ -8,6 +8,17 @@ function todayStr() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+function placeText(row, { codes = false } = {}) {
+  const line = row?.lineName || row?.lineCode || "";
+  const proc = row?.procName || row?.procCode || "";
+  const area = row?.areaName || row?.areaCode || "";
+  if (!line && !proc && !area) return "未匹配映射";
+  const main = [line, proc, area].filter(Boolean).join(" · ");
+  if (!codes) return main;
+  const ids = [row?.lineCode, row?.procCode, row?.areaCode].filter(Boolean).join(" / ");
+  return ids ? `${main}（${ids}）` : main;
+}
+
 export default function Raw({ project, toast }) {
   const [day, setDay] = useState(todayStr());
   const [q, setQ] = useState("");
@@ -39,16 +50,45 @@ export default function Raw({ project, toast }) {
           foot={<button className="btn" onClick={() => setModal(null)}>关闭</button>}>
           <div className="row between mb12">
             <span className={"tag " + (d.on ? "ok" : "")}>{d.on ? "活跃" : "非活跃"}</span>
-            <span style={{ fontSize: 12, color: "var(--t2)" }}>绑定 {d.tz} · EPC {d.epc || "—"}</span>
+            <span style={{ fontSize: 12, color: "var(--t2)" }}>
+              绑定 {d.tz} · EPC {d.epc || "—"}
+              {d.lineName || d.procName || d.areaName ? ` · ${placeText(d)}` : ""}
+            </span>
           </div>
-          <div className="tb-wrap" style={{ maxHeight: 330 }}>
+          <div className="tb-wrap" style={{ maxHeight: 360 }}>
             <table className="tb">
-              <thead><tr><th className="num">序号</th><th>时间戳</th><th>Hex 数据</th></tr></thead>
+              <thead>
+                <tr>
+                  <th className="num">序号</th>
+                  <th>时间戳</th>
+                  <th>EPC</th>
+                  <th>产线</th>
+                  <th>工序</th>
+                  <th>区域</th>
+                  <th>Hex 数据</th>
+                </tr>
+              </thead>
               <tbody>
                 {d.items.map((r) => (
                   <tr key={r.no}>
                     <td className="num">{r.no}</td>
-                    <td className="mono">{r.ts}{r.test ? <span className="src-edited" style={{ marginLeft: 6 }}>测试</span> : null}</td>
+                    <td className="mono">
+                      {r.ts}
+                      {r.test ? <span className="src-edited" style={{ marginLeft: 6 }}>测试</span> : null}
+                    </td>
+                    <td className="mono">{r.epc || "—"}</td>
+                    <td title={r.lineCode || ""}>
+                      {r.lineName || r.lineCode || "—"}
+                      {r.lineCode && r.lineName ? <div className="src-sub mono">{r.lineCode}</div> : null}
+                    </td>
+                    <td title={r.procCode || ""}>
+                      {r.procName || r.procCode || "—"}
+                      {r.procCode && r.procName ? <div className="src-sub mono">{r.procCode}</div> : null}
+                    </td>
+                    <td title={r.areaCode || ""}>
+                      {r.areaName || r.areaCode || "—"}
+                      {r.areaCode && r.areaName ? <div className="src-sub mono">{r.areaCode}</div> : null}
+                    </td>
                     <td className="mono">{r.hex}</td>
                   </tr>
                 ))}
@@ -56,7 +96,9 @@ export default function Raw({ project, toast }) {
             </table>
             {!d.items.length ? <div className="empty">该设备暂无上报记录。</div> : null}
           </div>
-          <div className="hint" style={{ marginTop: 12 }}>共 {d.n} 条记录 · 同一时刻可识别到多组标签数据，均完整保留；本页只读，不提供编辑 / 删除入口。</div>
+          <div className="hint" style={{ marginTop: 12 }}>
+            共 {d.n} 条记录 · EPC 按映射表解析产线 / 工序 / 区域；未命中映射时显示「—」。本页只读，不提供编辑 / 删除入口。
+          </div>
         </Modal>
       );
     } catch (e) {
@@ -69,9 +111,9 @@ export default function Raw({ project, toast }) {
     <div>
       <div className="kicker">模块 B · 项目内部 · 只读</div>
       <h1 className="page-title">原始数据监控（RFID 设备 EPC 数据）</h1>
-      <p className="sec-sub">仅展示<b>本项目</b>各读卡设备上报的原始 HEX 记录，只读、不可编辑或删除；顶部仅保留手动刷新，时间直接按日期筛选本项目记录。</p>
+      <p className="sec-sub">仅展示<b>本项目</b>各读卡设备上报的原始 HEX 记录，并按映射表标注 EPC 对应的产线 / 工序 / 区域；只读、不可编辑或删除。</p>
       <div className="toolbar">
-        <input className="search" placeholder="搜索设备 ID / EPC" value={q} onChange={(e) => setQ(e.target.value)} />
+        <input className="search" placeholder="搜索设备 / EPC / 产线 / 工序 / 区域" value={q} onChange={(e) => setQ(e.target.value)} />
         <div style={{ flex: 1 }} />
         <label className="chk">
           <input type="checkbox" style={{ width: 13, height: 13 }} checked={auto} onChange={(e) => setAuto(e.target.checked)} />
@@ -91,6 +133,7 @@ export default function Raw({ project, toast }) {
           <div className={"dev" + (d.on ? "" : " off")} key={d.id} onClick={() => openDev(d.id)}>
             <div className="id"><span className={"led" + (d.on ? " on" : "")} />{d.id}</div>
             <div className="hex">{d.hex || "—"}</div>
+            <div className="place">{placeText(d)}</div>
             <div className="foot">
               <span>{d.tz} · {d.seat}</span>
               <span>{d.n} 条 · {d.last && d.last !== "—" ? d.last.slice(11, 16) : "—"}</span>

@@ -123,6 +123,8 @@ class Area(Base):
     code: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(128))
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    last_identify_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_tz: Mapped[str] = mapped_column(String(64), default="")
 
     procedure: Mapped[Procedure] = relationship(back_populates="areas")
     tag_nos: Mapped[List["TagNo"]] = relationship(

@@ -125,6 +125,7 @@ class Area(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     last_identify_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     last_tz: Mapped[str] = mapped_column(String(64), default="")
+    reissue_count: Mapped[int] = mapped_column(Integer, default=0)
 
     procedure: Mapped[Procedure] = relationship(back_populates="areas")
     tag_nos: Mapped[List["TagNo"]] = relationship(
@@ -205,6 +206,9 @@ class LatestLocation(Base):
     test: Mapped[bool] = mapped_column(Boolean, default=False)
     skip_tick: Mapped[int] = mapped_column(Integer, default=-1)
     retry_proc: Mapped[str] = mapped_column(String(64), default="")
+    seq_guard: Mapped[bool] = mapped_column(Boolean, default=False)
+    seq_visited: Mapped[list] = mapped_column(JSON, default=list)
+    seq_reissue: Mapped[dict] = mapped_column(JSON, default=dict)
     identify_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

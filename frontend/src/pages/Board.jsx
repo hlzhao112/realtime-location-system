@@ -515,10 +515,16 @@ export default function Board({ project, toast, startWizard }) {
                               : (remembered?.agoSec != null ? remembered.agoSec : null);
                             const hasSeen = !!(last && last !== "—") || ago != null;
                             const tipTz = occ?.tz || remembered?.tz || "";
+                            const reissueN = Number(remembered?.reissue || 0) || 0;
                             return (
                               <div className="area-slot" key={a.id} {...dropOn(l, g, a)}>
                                 <div className="an">
-                                  <span className="an-name">{String(a.name || "").trim() || "-"}</span>
+                                  <div className="an-main">
+                                    <span className="an-name">{String(a.name || "").trim() || "-"}</span>
+                                    <span className={"an-reissue" + (reissueN > 0 ? " on" : "")} title={`该工序连续补发 ${reissueN} 次`}>
+                                      连续补发×{reissueN}
+                                    </span>
+                                  </div>
                                   {hasSeen ? (
                                     <span
                                       className={"an-ago" + (occ && !occ.online ? " warn" : "") + (!occ ? " left" : "")}

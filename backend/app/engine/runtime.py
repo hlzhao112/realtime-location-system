@@ -220,6 +220,171 @@ def next_proc(line: Optional[Line], code: str, name: str = ""):
     return procs[(procs.index(current) + 1) % len(procs)]
 
 
+def proc_index(line: Optional[Line], code: str, name: str = "") -> int:
+    """工序在产线中的 0-based 序号；找不到返回 -1。"""
+    if not line:
+        return -1
+    procs = list(line.procedures)
+    current = find_proc_named(line, code, name)
+    if current is None or current not in procs:
+        return -1
+    return procs.index(current)
+
+
+def update_seq_guard(loc: LatestLocation, line: Optional[Line], proc=None) -> None:
+    """按落位更新工序顺序保护开关。
+
+    - 进入第 2 道起开启（尚未到末道）
+    - 进入末道后关闭
+    - 仍在首道则保持关闭
+    """
+    procs = list(line.procedures) if line else []
+    if not procs or proc is None or proc not in procs:
+        loc.seq_guard = False
+        return
+    idx = procs.index(proc)
+    last_idx = len(procs) - 1
+    if idx >= last_idx:
+        loc.seq_guard = False
+    elif idx >= 1:
+        loc.seq_guard = True
+    else:
+        loc.seq_guard = False
+
+
+def seq_guard_blocks(
+    project: Project,
+    loc: Optional[LatestLocation],
+    target_line_code: str,
+    target_proc_code: str,
+    target_proc_name: str = "",
+) -> tuple[bool, str]:
+    """保护生效时：拦截历史工序与跨产线工序信号。返回 (是否拦截, 原因)。"""
+    if not loc or not bool(getattr(loc, "seq_guard", False)):
+        return False, ""
+    if loc.unassigned or not loc.line_code or not loc.proc_code:
+        return False, ""
+    cur_line = find_line(project, loc.line_code)
+    if not cur_line or not cur_line.procedures:
+        return False, ""
+    if (target_line_code or "") != loc.line_code:
+        return (
+            True,
+            f"工序顺序保护：已过滤跨产线信号（当前 {loc.line_code}，目标 {target_line_code or '—'}）",
+        )
+    cur_idx = proc_index(cur_line, loc.proc_code, loc.proc_name)
+    tgt_idx = proc_index(cur_line, target_proc_code, target_proc_name)
+    if tgt_idx < 0:
+        return True, f"工序顺序保护：已过滤非本产线工序信号（{target_proc_code}）"
+    if cur_idx >= 0 and tgt_idx < cur_idx:
+        return (
+            True,
+            f"工序顺序保护：已过滤历史工序信号（当前第 {cur_idx + 1} 道，目标第 {tgt_idx + 1} 道）",
+        )
+    return False, ""
+
+
+def proc_key(code: str, name: str = "") -> str:
+    return f"{code}|{(name or '').strip()}"
+
+
+def _seq_visited_set(loc: LatestLocation) -> set[str]:
+    raw = getattr(loc, "seq_visited", None) or []
+    return {str(x) for x in raw if x}
+
+
+def _seq_reissue_map(loc: LatestLocation) -> dict:
+    raw = getattr(loc, "seq_reissue", None) or {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): int(v or 0) for k, v in raw.items()}
+
+
+def _sync_loc_reissue(loc: LatestLocation) -> None:
+    m = _seq_reissue_map(loc)
+    loc.reissue = max(m.values()) if m else 0
+
+
+def mark_real_proc_visit(loc: LatestLocation, proc) -> None:
+    """真实业务识别命中该工序：记入已访问，并清零该工序连续补发次数。"""
+    if not proc:
+        return
+    key = proc_key(proc.code, proc.name)
+    visited = list(getattr(loc, "seq_visited", None) or [])
+    if key not in visited:
+        visited.append(key)
+    loc.seq_visited = visited
+    reissue_map = _seq_reissue_map(loc)
+    if key in reissue_map:
+        reissue_map.pop(key, None)
+    loc.seq_reissue = reissue_map
+    _sync_loc_reissue(loc)
+    for area in getattr(proc, "areas", None) or []:
+        area.reissue_count = 0
+
+
+def reissue_missing_procs(
+    db: Session,
+    project: Project,
+    trolley: Trolley,
+    loc: LatestLocation,
+    line,
+    before_idx: int,
+    when: datetime,
+    test: bool = False,
+) -> list[str]:
+    """进入第 2 道及以后时，对尚未真实访问的前置缺失工序各自动补发一次。"""
+    procs = list(line.procedures) if line else []
+    if before_idx < 1 or not procs:
+        return []
+    visited = _seq_visited_set(loc)
+    reissue_map = _seq_reissue_map(loc)
+    resend_max = max(1, int(getattr(project, "resend_max", None) or 10))
+    done: list[str] = []
+    for i in range(min(before_idx, len(procs))):
+        proc = procs[i]
+        key = proc_key(proc.code, proc.name)
+        if key in visited:
+            continue
+        count = int(reissue_map.get(key, 0))
+        if count >= resend_max:
+            write_log(
+                db,
+                project.id,
+                "信息",
+                f"台车 {trolley.tz} 缺失工序 {proc.name} 连续补发已达上限 {resend_max}，跳过",
+            )
+            continue
+        area = proc.areas[0] if getattr(proc, "areas", None) else None
+        if not area:
+            continue
+        count += 1
+        reissue_map[key] = count
+        for area_row in getattr(proc, "areas", None) or []:
+            area_row.reissue_count = count
+        area = proc.areas[0]
+        snap = SimpleNamespace(
+            line_code=line.code,
+            line_name=line.name,
+            proc_code=proc.code,
+            proc_name=proc.name,
+            area_code=area.code,
+            area_name=area.name,
+        )
+        create_push(db, project, trolley, snap, "连续补发", "auto", test, "still", when)
+        touch_area_seen(area, when, trolley.tz)
+        write_log(
+            db,
+            project.id,
+            "信息",
+            f"台车 {trolley.tz} 缺失工序自动补发：{line.name}·{proc.name}·{area.code}（连续补发×{count}）",
+        )
+        done.append(key)
+    loc.seq_reissue = reissue_map
+    _sync_loc_reissue(loc)
+    return done
+
+
 def pick_free_on_line(db: Session, project: Project, line, except_tz: str, start_proc=None):
     """未分配台车只进入目标工序，不跳过中间工序；无空位则挤占该工序。"""
     procs = list(line.procedures) if line else []
@@ -534,6 +699,8 @@ def apply_place(
     loc.identify_time = when
     if epc:
         loc.epc = pretty_epc(epc)
+    mark_real_proc_visit(loc, proc)
+    update_seq_guard(loc, line, proc)
     touch_area_seen(area, when, trolley.tz)
     db.flush()
     occupy_area(db, project, trolley, loc)
@@ -1215,15 +1382,18 @@ def board_payload(db: Session, project: Project) -> dict:
     area_seen = {}
     for line in project.lines:
         for proc in line.procedures:
+            # 工序级连续补发：取该工序下各区域最大值，保证每个区域都能显示
+            proc_reissue = 0
+            for area in proc.areas:
+                proc_reissue = max(proc_reissue, int(getattr(area, "reissue_count", None) or 0))
             for area in proc.areas:
                 when = aware(getattr(area, "last_identify_time", None))
-                if not when:
-                    continue
                 key = f"{line.code}|{proc.code}|{proc.name}|{area.code}"
                 area_seen[key] = {
-                    "last": fmt_local(when),
-                    "agoSec": max(0, int((now - when).total_seconds())),
+                    "last": fmt_local(when) if when else "—",
+                    "agoSec": max(0, int((now - when).total_seconds())) if when else None,
                     "tz": getattr(area, "last_tz", None) or "",
+                    "reissue": proc_reissue,
                 }
     procs = sum(len(l.procedures) for l in project.lines)
     areas = sum(len(pr.areas) for l in project.lines for pr in l.procedures)

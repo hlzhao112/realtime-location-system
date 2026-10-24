@@ -1,7 +1,7 @@
 import json
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -345,6 +345,105 @@ class TestProcRotation(unittest.TestCase):
         self.assertEqual(proc.name, "压浆")
         self.assertEqual(area.code, "D1")
         self.assertIs(evict, victim)
+
+
+class TestSeqGuard(unittest.TestCase):
+    def _line(self):
+        procs = [
+            SimpleNamespace(code="P1", name="一", areas=[]),
+            SimpleNamespace(code="P2", name="二", areas=[]),
+            SimpleNamespace(code="P3", name="三", areas=[]),
+            SimpleNamespace(code="P4", name="四", areas=[]),
+        ]
+        return SimpleNamespace(code="L1", name="线1", procedures=procs), procs
+
+    def test_guard_turns_on_at_second_and_off_at_last(self):
+        from app.engine import runtime
+
+        line, procs = self._line()
+        loc = SimpleNamespace(seq_guard=False)
+        runtime.update_seq_guard(loc, line, procs[0])
+        self.assertFalse(loc.seq_guard)
+        runtime.update_seq_guard(loc, line, procs[1])
+        self.assertTrue(loc.seq_guard)
+        runtime.update_seq_guard(loc, line, procs[2])
+        self.assertTrue(loc.seq_guard)
+        runtime.update_seq_guard(loc, line, procs[3])
+        self.assertFalse(loc.seq_guard)
+
+    def test_blocks_history_and_cross_line_when_guard_on(self):
+        from app.engine import runtime
+
+        line, procs = self._line()
+        project = SimpleNamespace(lines=[line])
+        loc = SimpleNamespace(
+            seq_guard=True,
+            unassigned=False,
+            line_code="L1",
+            proc_code="P3",
+            proc_name="三",
+        )
+        blocked, _ = runtime.seq_guard_blocks(project, loc, "L1", "P1", "一")
+        self.assertTrue(blocked)
+        blocked, _ = runtime.seq_guard_blocks(project, loc, "L2", "P4", "四")
+        self.assertTrue(blocked)
+        blocked, _ = runtime.seq_guard_blocks(project, loc, "L1", "P3", "三")
+        self.assertFalse(blocked)
+        blocked, _ = runtime.seq_guard_blocks(project, loc, "L1", "P4", "四")
+        self.assertFalse(blocked)
+
+    def test_no_block_when_guard_off(self):
+        from app.engine import runtime
+
+        line, _ = self._line()
+        project = SimpleNamespace(lines=[line])
+        loc = SimpleNamespace(
+            seq_guard=False,
+            unassigned=False,
+            line_code="L1",
+            proc_code="P1",
+            proc_name="一",
+        )
+        blocked, _ = runtime.seq_guard_blocks(project, loc, "L2", "PX", "x")
+        self.assertFalse(blocked)
+
+    def test_reissue_missing_before_second_proc(self):
+        from app.engine import runtime
+
+        line, procs = self._line()
+        for p in procs:
+            p.areas = [SimpleNamespace(code=f"A_{p.code}", name=p.name, reissue_count=0)]
+        project = SimpleNamespace(id=1, resend_max=10, push_enabled=False, test_made=0)
+        trolley = SimpleNamespace(tz="TZ_1", name="t")
+        loc = SimpleNamespace(seq_visited=[], seq_reissue={}, reissue=0)
+        pushes = []
+
+        def fake_push(db, project, trolley, loc_like, kind, *args, **kwargs):
+            pushes.append((kind, loc_like.proc_code, loc_like.area_code))
+            return SimpleNamespace(id=1)
+
+        with patch.object(runtime, "create_push", side_effect=fake_push), patch.object(
+            runtime, "write_log"
+        ), patch.object(runtime, "touch_area_seen"):
+            done = runtime.reissue_missing_procs(
+                Mock(), project, trolley, loc, line, before_idx=1, when=datetime.now(timezone.utc)
+            )
+        self.assertEqual(done, ["P1|一"])
+        self.assertEqual(loc.seq_reissue["P1|一"], 1)
+        self.assertEqual(procs[0].areas[0].reissue_count, 1)
+        self.assertEqual(pushes[0][0], "连续补发")
+
+    def test_real_visit_clears_reissue(self):
+        from app.engine import runtime
+
+        line, procs = self._line()
+        procs[0].areas = [SimpleNamespace(code="A1", reissue_count=3)]
+        loc = SimpleNamespace(seq_visited=[], seq_reissue={"P1|一": 3}, reissue=3)
+        runtime.mark_real_proc_visit(loc, procs[0])
+        self.assertIn("P1|一", loc.seq_visited)
+        self.assertNotIn("P1|一", loc.seq_reissue)
+        self.assertEqual(loc.reissue, 0)
+        self.assertEqual(procs[0].areas[0].reissue_count, 0)
 
 
 if __name__ == "__main__":

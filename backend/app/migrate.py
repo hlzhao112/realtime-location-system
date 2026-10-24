@@ -24,6 +24,9 @@ EXTRA = {
         ("test", "BOOLEAN DEFAULT 0"),
         ("skip_tick", "INTEGER DEFAULT -1"),
         ("retry_proc", "VARCHAR(64) DEFAULT ''"),
+        ("seq_guard", "BOOLEAN DEFAULT 0"),
+        ("seq_visited", "JSON"),
+        ("seq_reissue", "JSON"),
     ],
     "push_records": [
         ("kind", "VARCHAR(32) DEFAULT '实时上报'"),
@@ -38,6 +41,7 @@ EXTRA = {
     "areas": [
         ("last_identify_time", "TIMESTAMP"),
         ("last_tz", "VARCHAR(64) DEFAULT ''"),
+        ("reissue_count", "INTEGER DEFAULT 0"),
     ],
 }
 

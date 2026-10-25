@@ -23,8 +23,10 @@ from ..schemas import (
     TemplatePatchIn,
     TrolleyPatchIn,
 )
+from ..engine.mqtt_ingest import invalidate_dev_index
 from ..services.cache import rebuild_project_cache
 from ..services.normalize import norm_reader_id
+from ..services.pid_rules import assert_pid_allowed
 from ..services.project_svc import (
     apply_save,
     is_ready,
@@ -83,10 +85,12 @@ def get_project(pid: str, db: Session = Depends(get_db)):
 
 @router.post("", response_model=ProjectOut)
 def create_project(body: ProjectSaveIn, db: Session = Depends(get_db)):
-    if db.execute(select(Project).where(Project.pid == body.pid.strip())).scalar_one_or_none():
-        raise HTTPException(400, "PID 已存在，请更换")
     if not body.pid.strip() or not body.name.strip() or not body.folder:
         raise HTTPException(400, "Step1 为必填：PID、项目名称、监控文件夹")
+    try:
+        assert_pid_allowed(db, body.pid)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     token = new_ingest_token()
     p = Project(
         pid=body.pid.strip(),
@@ -108,6 +112,7 @@ def create_project(body: ProjectSaveIn, db: Session = Depends(get_db)):
         raise HTTPException(400, "Step2 为必填：至少一条产线映射且台车映射不能为空")
     rebuild_project_cache(db, p.id)
     write_log(db, p.id, "信息", f"新建项目 {p.pid} / {p.name}")
+    invalidate_dev_index()
     return to_out(db, p, ingest_once=token)
 
 
@@ -131,8 +136,10 @@ def update_project(pid: str, body: ProjectSaveIn, db: Session = Depends(get_db))
 @router.post("/{pid}/copy", response_model=ProjectOut)
 def copy_project(pid: str, body: CopyIn, db: Session = Depends(get_db)):
     src = _must(db, pid)
-    if db.execute(select(Project).where(Project.pid == body.pid.strip())).scalar_one_or_none():
-        raise HTTPException(400, "PID 已存在，请更换")
+    try:
+        assert_pid_allowed(db, body.pid)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     token = new_ingest_token()
     dst = Project(
         pid=body.pid.strip(),
@@ -169,6 +176,7 @@ def copy_project(pid: str, body: CopyIn, db: Session = Depends(get_db)):
     dst = load_project(db, dst.pid)
     rebuild_project_cache(db, dst.id)
     write_log(db, dst.id, "信息", f"由 {src.pid} 复制项目 {dst.pid}")
+    invalidate_dev_index()
     return to_out(db, dst, ingest_once=token)
 
 
@@ -177,6 +185,7 @@ def delete_project(pid: str, db: Session = Depends(get_db)):
     p = _must(db, pid)
     db.delete(p)
     write_log(db, None, "信息", f"删除项目 {pid}（映射与运行数据一并删除）")
+    invalidate_dev_index()
     return {"ok": True}
 
 

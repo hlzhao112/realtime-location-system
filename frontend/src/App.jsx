@@ -4,6 +4,7 @@ import { Logo, blankProject, fromApi } from "./helpers.jsx";
 import Board from "./pages/Board.jsx";
 import Info from "./pages/Info.jsx";
 import Logs from "./pages/Logs.jsx";
+import MqttFeed from "./pages/MqttFeed.jsx";
 import Raw from "./pages/Raw.jsx";
 import Wizard from "./pages/Wizard.jsx";
 import { Modal, ToastHost } from "./ui.jsx";
@@ -112,6 +113,7 @@ export default function App() {
           <div className="crumb">
             <span className="go" onClick={() => { setCur(null); setView("projects"); loadList(); }}>项目看板</span>
             {cur && <><span className="sep">/</span><b>{cur.name}</b><span className="tag mono">{cur.pid}</span></>}
+            {view === "mqtt" && <><span className="sep">/</span><b>MQTT 全部数据</b></>}
             {view === "wizard" && <><span className="sep">/</span><b>{wiz?.mode === "edit" ? "编辑项目" : wiz?.mode === "copy" ? "复制项目" : "新建项目"}</b></>}
             {cur && view !== "wizard" && <><span className="sep">/</span><span>{NAV.find((x) => x.id === view)?.label.split(" · ")[0] || "项目信息"}</span></>}
           </div>
@@ -151,6 +153,9 @@ export default function App() {
           )}
         </nav>
         <main className="main">
+          {view === "mqtt" && (
+            <MqttFeed toast={toast} onBack={() => { setView("projects"); loadList(); }} />
+          )}
           {view === "projects" && (
             <section>
               <div className="kicker">模块 C · 首屏</div>
@@ -165,6 +170,7 @@ export default function App() {
               <div className="toolbar">
                 <input className="search" placeholder="搜索 PID / 项目名称" value={q} onChange={(e) => setQ(e.target.value)} />
                 <div style={{ flex: 1 }} />
+                <button className="btn" onClick={() => setView("mqtt")}>查看 MQTT 全部数据</button>
                 <button className="btn primary" onClick={() => startWizard("new")}>新建项目</button>
               </div>
               <div className="proj-grid">
@@ -197,7 +203,7 @@ export default function App() {
                                 } catch (e) { toast(e.message); }
                               }}>复制并进入向导</button></>}>
                             <div className="alert">复制配置与映射，不复制运行数据。AppSecret 不复制。</div>
-                            <div className="field"><label>新项目 PID</label><input className="input" id="cpPid" defaultValue={p.pid + "_2"} /></div>
+                            <div className="field"><label>新项目 PID</label><input className="input" id="cpPid" placeholder="不能与已有 PID 重复，也不能包含已有 PID" /></div>
                             <div className="field"><label>项目名称</label><input className="input" id="cpName" defaultValue={p.name + "-副本"} /></div>
                           </Modal>
                         );

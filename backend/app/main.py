@@ -130,6 +130,13 @@ def on_startup():
     start_mqtt()
 
 
+@app.on_event("shutdown")
+def on_shutdown():
+    from .engine.mqtt_client import stop_mqtt
+
+    stop_mqtt()
+
+
 @app.get("/api/v1/health")
 def health():
     from .engine.mqtt_client import mqtt_status

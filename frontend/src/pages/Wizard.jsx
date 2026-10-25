@@ -130,7 +130,7 @@ function Step1({ draft, setDraft }) {
       <div className="fieldset">
         <div className="fh"><span className="t">项目基本信息</span><span className="s">必填</span></div>
         <div className="fb">
-          <Field label="项目唯一 PID" req hint="需与 MQTT 报文中的 dev 一致，例如 OF2、HN-24；创建后不可改">
+          <Field label="项目唯一 PID" req hint="唯一且创建后不可改；不能包含已有项目 PID（已有 OF 则不能再建 OF2）">
             <input className="input mono" value={c.pid} disabled={!!draft._lockedPid} onChange={(e) => set("pid", e.target.value.trim())} />
           </Field>
           <Field label="项目名称" req hint="也可用于匹配 MQTT 的 dev 字段">

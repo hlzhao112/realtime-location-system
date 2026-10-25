@@ -7,7 +7,17 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base
 from app.engine.mqtt_codec import parse_mqtt_payload
 from app.engine.mqtt_history import filter_project_messages
-from app.engine.mqtt_ingest import build_dev_index, invalidate_dev_index, project_dev_keys, resolve_project_by_dev
+from datetime import datetime, timezone
+
+from app.engine.mqtt_ingest import (
+    build_dev_index,
+    invalidate_dev_index,
+    list_mqtt_events,
+    persist_mqtt_event,
+    project_dev_keys,
+    resolve_project_by_dev,
+)
+from app.services.pid_rules import match_contained_pid, pid_conflict
 from app.engine.parse import extract_epcs
 from app.models import Project, Trolley
 
@@ -85,12 +95,38 @@ class MqttProjectMapTests(unittest.TestCase):
     def test_unknown_dev(self):
         self.assertIsNone(resolve_project_by_dev(self.db, "test50"))
 
+    def test_resolve_by_contained_pid(self):
+        p = resolve_project_by_dev(self.db, "HN-99")
+        self.assertEqual(p.pid, "HN")
+
     def test_project_dev_keys_include_pid_name_reader(self):
         hn = self.db.query(Project).filter_by(pid="HN").one()
         keys = project_dev_keys(hn)
         self.assertIn("hn", keys)
         self.assertIn("淮南", keys)
         self.assertIn("hn-24", keys)
+
+    def test_contained_pid_prefers_longest(self):
+        self.assertEqual(match_contained_pid("OF2", ["OF", "PY"]), "OF")
+        self.assertEqual(match_contained_pid("LYG10", ["LYG", "OF"]), "LYG")
+        self.assertEqual(match_contained_pid("RFID1", ["HL_Test", "OF"]), "")
+
+    def test_pid_cannot_contain_existing(self):
+        self.assertIn("不能包含", pid_conflict("OF2", ["OF"]))
+        self.assertIn("已存在", pid_conflict("OF", ["OF"]))
+        self.assertEqual(pid_conflict("PY", ["OF", "LYG"]), "")
+
+    def test_list_mqtt_events_matches_contained_pid(self):
+        now = datetime.now(timezone.utc)
+        persist_mqtt_event(self.db, {"dev": "HN-99", "hex": SAMPLE_HEX, "topic": "dev/coo/HN-99"}, now)
+        persist_mqtt_event(self.db, {"dev": "RFID1", "hex": SAMPLE_HEX, "topic": "dev/coo/RFID1"}, now)
+        self.db.commit()
+        all_rows = list_mqtt_events(self.db)
+        self.assertEqual({r["deviceId"] for r in all_rows["items"]}, {"HN-99", "RFID1"})
+        hn_rows = list_mqtt_events(self.db, pid="HN")
+        self.assertEqual([r["projectPid"] for r in hn_rows["items"]], ["HN"])
+        none_rows = list_mqtt_events(self.db, pid="__none__")
+        self.assertEqual([r["deviceId"] for r in none_rows["items"]], ["RFID1"])
 
     def test_filter_keeps_only_this_project(self):
         hn = self.db.query(Project).filter_by(pid="HN").one()

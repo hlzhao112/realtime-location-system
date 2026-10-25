@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     mqtt_client_id: str = "trolley-tracking"
     mqtt_api_url: str = "http://47.109.22.35:18083"
     mqtt_refetch_sec: float = 8.0
+    mqtt_session_expiry: int = 604800
 
     templates_dir: Path = ROOT / "templates"
 

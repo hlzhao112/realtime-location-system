@@ -92,6 +92,25 @@ def mqtt_status(_user: User = Depends(get_current_user)):
     return status()
 
 
+@router.get("/mqtt/raw")
+def mqtt_raw(
+    pid: str = "",
+    limit: int = 1000,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    from ..engine.mqtt_ingest import list_mqtt_events
+
+    return list_mqtt_events(db, pid=pid, limit=limit)
+
+
+@router.post("/mqtt/raw/refresh")
+def mqtt_raw_refresh(db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
+    from ..engine.mqtt_ingest import refresh_mqtt_feed
+
+    return refresh_mqtt_feed(db, timeout_sec=5.0)
+
+
 @router.get("/projects/{pid}/locations", response_model=list[LocationOut])
 def list_locations(pid: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
     """内部接口，供后续主看板使用。本版管理端不展示。"""

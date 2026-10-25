@@ -349,6 +349,17 @@ def test_speed(pid: str, body: TestSpeedIn, db: Session = Depends(get_db), _user
     return _locked(db, _do)
 
 
+@router.post("/{pid}/raw/refetch")
+def refetch_raw(pid: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
+    from ..engine.mqtt_history import refetch_project_history
+
+    p = _must(db, pid)
+    try:
+        return refetch_project_history(db, p)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e)) from e
+
+
 @router.get("/{pid}/raw")
 def get_raw(
     pid: str,

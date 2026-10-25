@@ -21,6 +21,18 @@ def extract_epcs(hex_data: str, epcs: list[str]) -> list[str]:
     compact = norm_epc(hex_data)
     if not compact:
         return []
+    found: list[str] = []
+    start = 0
+    while True:
+        i = compact.find("E2", start)
+        if i < 0 or len(compact) < i + 24:
+            break
+        chunk = compact[i : i + 24]
+        if chunk not in found:
+            found.append(chunk)
+        start = i + 24
+    if found:
+        return found
     # 常见 EPC 96bit = 24 hex chars；按 24 切分，剩余整段也保留
     if len(compact) >= 24 and len(compact) % 24 == 0:
         return [compact[i : i + 24] for i in range(0, len(compact), 24)]

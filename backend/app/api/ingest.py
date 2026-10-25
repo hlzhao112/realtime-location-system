@@ -85,6 +85,13 @@ def process_queued(item: dict) -> None:
         db.close()
 
 
+@router.get("/mqtt/status")
+def mqtt_status(_user: User = Depends(get_current_user)):
+    from ..engine.mqtt_client import mqtt_status as status
+
+    return status()
+
+
 @router.get("/projects/{pid}/locations", response_model=list[LocationOut])
 def list_locations(pid: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
     """内部接口，供后续主看板使用。本版管理端不展示。"""

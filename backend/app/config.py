@@ -27,6 +27,16 @@ class Settings(BaseSettings):
     ingest_dedup_ttl: int = 600
     ingest_max_epcs: int = 32
 
+    mqtt_enabled: bool = True
+    mqtt_broker: str = "47.109.22.35"
+    mqtt_port: int = 1883
+    mqtt_username: str = "admin"
+    mqtt_password: str = "123456"
+    mqtt_topic: str = "dev/coo/+"
+    mqtt_client_id: str = "trolley-tracking"
+    mqtt_api_url: str = "http://47.109.22.35:18083"
+    mqtt_refetch_sec: float = 8.0
+
     templates_dir: Path = ROOT / "templates"
 
     @property

@@ -90,7 +90,7 @@ export default function Wizard({ draft, setDraft, mode, step, setStep, onCancel,
 
       <div className="wiz-foot">
         <button className="btn" onClick={onCancel}>取消</button>
-        <span className="note">{step === 3 ? "未做修改时按默认模板生效。" : step === 1 ? "PID 唯一且不可重复；AppSecret 保存后不回显。" : "两张表均支持文档导入或手工填写，可混用。"}</span>
+        <span className="note">{step === 3 ? "未做修改时按默认模板生效。" : step === 1 ? "PID 需能对应 MQTT 报文中的 dev；AppSecret 保存后不回显。" : "两张表均支持文档导入或手工填写，可混用。"}</span>
         <div className="spacer" />
         {step > 1 && <button className="btn" onClick={() => go(step - 1)}>上一步</button>}
         {step === 3 && <button className="btn" onClick={() => finish(true)} disabled={busy}>跳过此步</button>}
@@ -126,14 +126,14 @@ function Step1({ draft, setDraft }) {
   const set = (k, v) => fset(draft, setDraft, k, v);
   return (
     <>
-      <div className="alert">工序顺序不在此配置，由 Step2 映射表中每条产线的工序列表排列决定。</div>
+      <div className="alert">现场原始数据来自 MQTT 主题 dev/coo/+。报文里的 <b>dev</b>（如 OF2、HN-24）会按 PID、项目名称或台车读卡器编号映射到本项目。工序顺序不在此配置，由 Step2 映射表中每条产线的工序列表排列决定。</div>
       <div className="fieldset">
         <div className="fh"><span className="t">项目基本信息</span><span className="s">必填</span></div>
         <div className="fb">
-          <Field label="项目唯一 PID" req hint="英文数字，创建后不可改">
+          <Field label="项目唯一 PID" req hint="需与 MQTT 报文中的 dev 一致，例如 OF2、HN-24；创建后不可改">
             <input className="input mono" value={c.pid} disabled={!!draft._lockedPid} onChange={(e) => set("pid", e.target.value.trim())} />
           </Field>
-          <Field label="项目名称" req>
+          <Field label="项目名称" req hint="也可用于匹配 MQTT 的 dev 字段">
             <input className="input" value={c.name} onChange={(e) => set("name", e.target.value)} />
           </Field>
         </div>

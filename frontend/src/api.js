@@ -150,6 +150,9 @@ export const api = {
   testClear: (pid) => request(`/api/v1/projects/${pid}/test/clear`, { method: "POST" }),
   testSpeed: (pid, mode) =>
     request(`/api/v1/projects/${pid}/test/speed`, { method: "POST", body: JSON.stringify({ mode }) }),
+  mqttStatus: () => request("/api/v1/mqtt/status"),
+  rawRefetch: (pid) =>
+    request(`/api/v1/projects/${pid}/raw/refetch`, { method: "POST", timeoutMs: 30000 }),
   raw: (pid, day = "", q = "") =>
     request(`/api/v1/projects/${pid}/raw?day=${encodeURIComponent(day)}&q=${encodeURIComponent(q)}`),
   rawDevice: (pid, id, day = "") =>

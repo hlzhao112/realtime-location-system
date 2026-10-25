@@ -111,6 +111,8 @@ def _outbound_loop():
 
 @app.on_event("startup")
 def on_startup():
+    from .engine.mqtt_client import start_mqtt
+
     Base.metadata.create_all(bind=engine)
     migrate(engine)
     db = SessionLocal()
@@ -125,8 +127,11 @@ def on_startup():
     r.start()
     p = threading.Thread(target=_outbound_loop, name="push-worker", daemon=True)
     p.start()
+    start_mqtt()
 
 
 @app.get("/api/v1/health")
 def health():
-    return {"ok": True, "name": settings.app_name}
+    from .engine.mqtt_client import mqtt_status
+
+    return {"ok": True, "name": settings.app_name, "mqtt": mqtt_status()}

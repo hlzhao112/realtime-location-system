@@ -25,11 +25,14 @@ export default function Raw({ project, toast }) {
   const [auto, setAuto] = useState(false);
   const [data, setData] = useState({ devices: [], stats: { active: 0, inactive: 0, total: 0, today: 0 } });
   const [modal, setModal] = useState(null);
+  const [mqtt, setMqtt] = useState(null);
+  const [busy, setBusy] = useState(false);
   const pid = project.pid;
 
   const load = useCallback(async () => {
-    const r = await api.raw(pid, day, q);
+    const [r, m] = await Promise.all([api.raw(pid, day, q), api.mqttStatus().catch(() => null)]);
     setData(r);
+    if (m) setMqtt(m);
   }, [pid, day, q]);
 
   useEffect(() => {
@@ -106,12 +109,56 @@ export default function Raw({ project, toast }) {
     }
   }
 
+  function confirmRefetch() {
+    setModal(
+      <Modal
+        title="重新获取该项目历史数据"
+        onClose={() => setModal(null)}
+        foot={
+          <>
+            <button className="btn" onClick={() => setModal(null)}>取消</button>
+            <button className="btn primary" onClick={doRefetch}>开始获取</button>
+          </>
+        }
+      >
+        <div className="alert">
+          将向 MQTT 重新订阅 <b>dev/coo/+</b>，只写入本项目能匹配到的报文（PID / 项目名称 / 读卡器编号 = 报文里的 <b>dev</b>）。
+          Broker 通常只保留每个主题的最后一条（retain）以及当前正在上报的数据，<b>无法保证补全全部历史流水</b>。
+        </div>
+      </Modal>
+    );
+  }
+
+  async function doRefetch() {
+    setBusy(true);
+    setModal(null);
+    try {
+      const r = await api.rawRefetch(pid);
+      await load();
+      toast(
+        `收到 ${r.collected || 0} 条，本项目匹配 ${r.matched || 0} 条，已写入 ${r.ingested || 0} 条`,
+        "历史数据"
+      );
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const s = data.stats || {};
   return (
     <div>
       <div className="kicker">模块 B · 项目内部 · 只读</div>
       <h1 className="page-title">原始数据监控（RFID 设备 EPC 数据）</h1>
-      <p className="sec-sub">仅展示<b>本项目</b>各读卡设备上报的原始 HEX 记录，并按映射表标注 EPC 对应的产线 / 工序 / 区域；只读、不可编辑或删除。</p>
+      <p className="sec-sub">
+        数据来自 MQTT 主题 <b>dev/coo/+</b>，按报文 <b>dev</b> 字段归属本项目。仅展示各读卡设备上报的原始 HEX，并按映射表标注 EPC 对应的产线 / 工序 / 区域；只读、不可编辑或删除。
+        {mqtt ? (
+          <span className={"tag " + (mqtt.connected ? "ok" : mqtt.enabled ? "err" : "")} style={{ marginLeft: 8 }}>
+            {mqtt.connected ? "MQTT 已连接" : mqtt.enabled ? "MQTT 未连接" : "MQTT 已关闭"}
+          </span>
+        ) : null}
+      </p>
       <div className="toolbar">
         <input className="search" placeholder="搜索设备 / EPC / 产线 / 工序 / 区域" value={q} onChange={(e) => setQ(e.target.value)} />
         <div style={{ flex: 1 }} />
@@ -121,6 +168,9 @@ export default function Raw({ project, toast }) {
         </label>
         <input className="input" type="date" value={day} onChange={(e) => setDay(e.target.value)} style={{ width: 152, height: 32 }} />
         <button className="btn sm" onClick={() => load().then(() => toast("已拉取本项目最新数据")).catch((e) => toast(e.message))}>↻ 手动刷新</button>
+        <button className="btn sm primary" disabled={busy} onClick={confirmRefetch}>
+          {busy ? "正在获取…" : "重新获取该项目历史数据"}
+        </button>
       </div>
       <div className="statbar">
         <div className="stat"><div className="n ok">{s.active || 0}</div><div className="l">活跃设备</div></div>

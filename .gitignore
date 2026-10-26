@@ -1,4 +1,9 @@
 backend/trolley.db
+backend/trolley.db-wal
+backend/trolley.db-shm
+*.db
+*.db-wal
+*.db-shm
 __pycache__/
 *.pyc
 .venv/

@@ -91,7 +91,7 @@ function Basic({ p, setProject, toast, setModal, goMap }) {
         <div className="sec-h">项目基本信息</div>
         <div className="grid g4">{kv("项目唯一 PID", c.pid, 1)}{kv("项目名称", c.name)}{kv("生产线／工序分区", `${(p.lines || []).length} 条 / ${countAreas(p)} 个`)}{kv("台车总数", (p.trolleys || []).length + " 台")}</div>
         <div className="row" style={{ marginTop: 11 }}>
-          <span className="mini-note" style={{ flex: 1 }}>工序顺序由映射表拖拽决定。</span>
+          <span className="mini-note" style={{ flex: 1 }}>MQTT 报文中的 dev 会匹配本项目 PID、项目名称或台车读卡器编号。工序顺序由映射表拖拽决定。</span>
           <button className="btn sm" onClick={goMap}>去映射表调整顺序</button>
         </div>
       </div>

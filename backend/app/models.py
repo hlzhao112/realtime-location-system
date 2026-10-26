@@ -218,6 +218,19 @@ class LatestLocation(Base):
     trolley: Mapped[Trolley] = relationship(back_populates="location")
 
 
+class MqttEvent(Base):
+    """MQTT 原始报文流水，不按项目拆表，供看板总览。"""
+
+    __tablename__ = "mqtt_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(64), index=True)
+    hex_data: Mapped[str] = mapped_column(Text, default="")
+    topic: Mapped[str] = mapped_column(String(256), default="")
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class RawReport(Base):
     """预留：原始 HEX。本版写入但不提供管理页。"""
 

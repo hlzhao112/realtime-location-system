@@ -124,8 +124,14 @@ def lookup_reader(cache: dict, device_id: str) -> TrolleyHit | None:
     item = readers.get(device_id)
     if not item:
         alt = norm_reader_id(device_id)
-        if alt and alt != device_id:
+        if alt:
             item = readers.get(alt)
+    if not item and device_id:
+        target = str(device_id).strip().lower()
+        for key, val in readers.items():
+            if str(key).strip().lower() == target:
+                item = val
+                break
     if not item:
         return None
     return TrolleyHit(**item)

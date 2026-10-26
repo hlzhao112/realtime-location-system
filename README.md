@@ -34,7 +34,7 @@ docker compose up --build
 
 ## 新建项目与映射表
 
-1. 登录 → 新建项目，填 PID / 名称 / 监控文件夹。
+1. 登录 → 新建项目，填 PID / 名称 / 监控文件夹。PID 不能与已有项目重复，也不能包含已有项目的 PID。
 2. Step2 导入两张映射表一：`templates/位置-编号映射表.xlsx` + `templates/编号-映射表.xlsx`。
 3. 再导入映射表二：`templates/港台座编号映射.xlsx`。
 4. Step3 可跳过（默认报文模板）。
@@ -42,7 +42,23 @@ docker compose up --build
 
 页面也可下载空白模板。现场文件第 6 列表头即使写成「区域」，也会按区域 ID 解析。
 
+## 原始数据来源（MQTT）
+
+后端启动后会订阅现场 MQTT，把定位报文写入对应项目的原始数据与解析引擎（测试模式生成的数据可继续用于演示）：
+
+- Broker：`47.109.22.35:1883`
+- 主题：`dev/coo/+`
+- 报文：`{"dev":"OF2","hex":"BB02...E280..."}`，其中 **`dev` 为项目唯一标识**（匹配项目 PID、项目名称，或台车读卡器编号）
+- HEX 中从 `E2` 起截取 24 位作为 EPC
+- 项目看板可查看全部 MQTT 原始数据（Device ID / 项目名称 / Hex），按项目筛选，并支持手动刷新
+- 项目 PID 全局唯一，且新 PID 不能包含已有项目 PID（例如已有 `OF` 则不能再建 `OF2`）
+- 使用 MQTT v5 持久会话（固定 Client ID、`clean_start=false`、QoS 1）。程序中断后再上线，broker 会补发会话内未确认报文；启动时还会自动回拉 retain / 短时在线路由报文
+
+参数可用环境变量覆盖，见 `.env.example`。健康检查 `GET /api/v1/health` 会返回 MQTT 连接状态。
+
 ## 设备上报
+
+HTTP 上报仍可用（读卡器或模拟脚本）：
 
 ```http
 POST /api/v1/ingest/report

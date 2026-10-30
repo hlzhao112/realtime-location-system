@@ -4,9 +4,12 @@ from io import BytesIO
 from openpyxl import Workbook
 
 from app.services.excel_io import (
+    SPARE_AREA_ID,
+    SPARE_LINE_ID,
     TZ_ALIASES,
     TZ_HEADERS,
     _map_headers,
+    attach_unused_nos,
     build_lines_from_pos,
     parse_position_file,
     parse_trolley_file,
@@ -132,6 +135,30 @@ class MappingImportTest(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[-1]["区域"], "养护区")
         self.assertEqual(rows[-1]["蓝牙标签编号"], "B2")
+
+    def test_unused_nos_are_attached_as_spare(self):
+        pos = [
+            {
+                "生产线": "1#产线",
+                "生产线ID": "ZCX_1",
+                "工序": "蒸养",
+                "工序ID": "GX_1",
+                "区域": "蒸养区",
+                "区域ID": "QY_1",
+                "蓝牙标签编号": "B1",
+            }
+        ]
+        no_map = {"B1": ["E1"], "B2": ["E2a", "E2b"], "B3": ["E3"]}
+        lines, used, undefined = build_lines_from_pos(pos, no_map)
+        self.assertEqual(undefined, [])
+        unused = attach_unused_nos(lines, no_map, used)
+        self.assertEqual(unused, ["B2", "B3"])
+        self.assertEqual(set(used), {"B1", "B2", "B3"})
+        spare_line = next(item for item in lines if item["id"] == SPARE_LINE_ID)
+        spare_area = spare_line["procs"][0]["areas"][0]
+        self.assertEqual(spare_area["id"], SPARE_AREA_ID)
+        self.assertEqual(spare_area["nos"], ["B2", "B3"])
+        self.assertEqual(used["B2"], ["E2a", "E2b"])
 
     def test_replace_mapping_persists_last_tag_epcs(self):
         from sqlalchemy import create_engine, func, select

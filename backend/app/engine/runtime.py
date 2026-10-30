@@ -1429,45 +1429,57 @@ def board_payload(db: Session, project: Project) -> dict:
     }
 
 
-def resolve_raw_place(project: Project, db: Session, hex_data: str = "", epcs: Optional[list] = None) -> dict:
-    """用映射表把原始 HEX / EPC 解析为产线·工序·区域。"""
+def _empty_raw_tag() -> dict:
+    return {
+        "epc": "",
+        "tagNo": "",
+        "lineCode": "",
+        "lineName": "",
+        "procCode": "",
+        "procName": "",
+        "areaCode": "",
+        "areaName": "",
+    }
+
+
+def resolve_raw_tags(project: Project, db: Session, hex_data: str = "", epcs: Optional[list] = None) -> list[dict]:
+    """一条 HEX 里的每个标签都解析成 EPC + 标签编号 + 产线/工序/区域。"""
     from ..services.cache import get_cache, lookup_epc
     from .parse import extract_epcs
 
     cache = get_cache(db, project)
     candidates = extract_epcs(hex_data or "", [str(x) for x in (epcs or []) if x])
-    display = ""
-    hit = None
+    tags = []
     for e in candidates:
         pretty = pretty_epc(e) or e
-        if not display:
-            display = pretty
         found = lookup_epc(cache, e)
-        if found:
-            hit = found
-            display = pretty
-            break
-    if not display and epcs:
-        display = pretty_epc(str(epcs[-1])) or str(epcs[-1])
-    if not hit:
-        return {
-            "epc": display or "",
-            "lineCode": "",
-            "lineName": "",
-            "procCode": "",
-            "procName": "",
-            "areaCode": "",
-            "areaName": "",
-        }
-    return {
-        "epc": display or "",
-        "lineCode": hit.line_code,
-        "lineName": hit.line_name,
-        "procCode": hit.proc_code,
-        "procName": hit.proc_name,
-        "areaCode": hit.area_code,
-        "areaName": hit.area_name,
-    }
+        if not found:
+            tags.append({**_empty_raw_tag(), "epc": pretty})
+            continue
+        tags.append(
+            {
+                "epc": pretty,
+                "tagNo": found.tag_no or "",
+                "lineCode": found.line_code,
+                "lineName": found.line_name,
+                "procCode": found.proc_code,
+                "procName": found.proc_name,
+                "areaCode": found.area_code,
+                "areaName": found.area_name,
+            }
+        )
+    return tags
+
+
+def resolve_raw_place(project: Project, db: Session, hex_data: str = "", epcs: Optional[list] = None) -> dict:
+    """用映射表把原始 HEX / EPC 解析为产线·工序·区域。多标签全部放在 tags。"""
+    tags = resolve_raw_tags(project, db, hex_data, epcs)
+    hit = next((t for t in tags if t["lineCode"] or t["procCode"] or t["areaCode"]), None)
+    base = dict(hit or (tags[0] if tags else _empty_raw_tag()))
+    if not base["epc"] and epcs:
+        base["epc"] = pretty_epc(str(epcs[-1])) or str(epcs[-1])
+    base["tags"] = tags
+    return base
 
 
 def raw_payload(db: Session, project: Project, day: str = "", q: str = "") -> dict:
@@ -1502,14 +1514,10 @@ def raw_payload(db: Session, project: Project, day: str = "", q: str = "") -> di
             act += 1
         hex_data = last.hex_data if last else ""
         place = resolve_raw_place(project, db, hex_data, last.epcs if last else None) if last else {
-            "epc": "",
-            "lineCode": "",
-            "lineName": "",
-            "procCode": "",
-            "procName": "",
-            "areaCode": "",
-            "areaName": "",
+            **_empty_raw_tag(),
+            "tags": [],
         }
+        tags = place.get("tags") or []
         epc = place.get("epc") or ""
         item = {
             "id": did,
@@ -1518,6 +1526,8 @@ def raw_payload(db: Session, project: Project, day: str = "", q: str = "") -> di
             "on": active,
             "hex": hex_data,
             "epc": epc,
+            "tagNo": place.get("tagNo") or "",
+            "tags": tags,
             "lineCode": place.get("lineCode") or "",
             "lineName": place.get("lineName") or "",
             "procCode": place.get("procCode") or "",
@@ -1532,7 +1542,23 @@ def raw_payload(db: Session, project: Project, day: str = "", q: str = "") -> di
             [
                 did,
                 epc or "",
+                item["tagNo"],
                 hex_data,
+                " ".join(
+                    " ".join(
+                        [
+                            t.get("epc") or "",
+                            t.get("tagNo") or "",
+                            t.get("lineCode") or "",
+                            t.get("lineName") or "",
+                            t.get("procCode") or "",
+                            t.get("procName") or "",
+                            t.get("areaCode") or "",
+                            t.get("areaName") or "",
+                        ]
+                    )
+                    for t in tags
+                ),
                 item["lineCode"],
                 item["lineName"],
                 item["procCode"],
@@ -1583,6 +1609,8 @@ def raw_device(db: Session, project: Project, device_id: str, day: str = "") -> 
                 "ts": fmt_local(r.ts, ms=True),
                 "hex": r.hex_data,
                 "epc": place.get("epc") or "",
+                "tagNo": place.get("tagNo") or "",
+                "tags": place.get("tags") or [],
                 "lineCode": place.get("lineCode") or "",
                 "lineName": place.get("lineName") or "",
                 "procCode": place.get("procCode") or "",
@@ -1593,7 +1621,7 @@ def raw_device(db: Session, project: Project, device_id: str, day: str = "") -> 
             }
         )
     last = rows[0] if rows else None
-    last_place = resolve_raw_place(project, db, last.hex_data or "", last.epcs) if last else {}
+    last_place = resolve_raw_place(project, db, last.hex_data or "", last.epcs) if last else {**_empty_raw_tag(), "tags": []}
     epc = last_place.get("epc") or ""
     return {
         "id": device_id,
@@ -1601,6 +1629,8 @@ def raw_device(db: Session, project: Project, device_id: str, day: str = "") -> 
         "seat": trolley.name if trolley else "未绑定台车",
         "on": bool(last and (now_utc() - aware(last.ts)) <= timedelta(minutes=offline_minutes(project))),
         "epc": epc,
+        "tagNo": last_place.get("tagNo") or "",
+        "tags": last_place.get("tags") or [],
         "lineCode": last_place.get("lineCode") or "",
         "lineName": last_place.get("lineName") or "",
         "procCode": last_place.get("procCode") or "",

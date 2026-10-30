@@ -19,6 +19,28 @@ function placeText(row, { codes = false } = {}) {
   return ids ? `${main}（${ids}）` : main;
 }
 
+function tagRows(row) {
+  if (row?.tags?.length) return row.tags;
+  if (row?.epc || row?.lineName || row?.lineCode || row?.procName || row?.areaName) return [row];
+  return [];
+}
+
+function TagLines({ row }) {
+  const tags = tagRows(row);
+  if (!tags.length) return <div className="place">未匹配映射</div>;
+  return (
+    <div className="tags">
+      {tags.map((t, i) => (
+        <div className="tagline" key={`${t.epc || "tag"}-${i}`}>
+          {t.tagNo ? <span className="tagno mono">{t.tagNo}</span> : null}
+          {t.epc ? <span className="epc">{t.epc}</span> : null}
+          <span>{placeText(t)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function Raw({ project, toast }) {
   const [day, setDay] = useState(todayStr());
   const [q, setQ] = useState("");
@@ -54,8 +76,11 @@ export default function Raw({ project, toast }) {
           <div className="row between mb12">
             <span className={"tag " + (d.on ? "ok" : "")}>{d.on ? "活跃" : "非活跃"}</span>
             <span style={{ fontSize: 12, color: "var(--t2)" }}>
-              绑定 {d.tz} · EPC {d.epc || "—"}
-              {d.lineName || d.procName || d.areaName ? ` · ${placeText(d)}` : ""}
+              绑定 {d.tz}
+              {tagRows(d).length > 1
+                ? ` · ${tagRows(d).length} 个标签`
+                : ` · 编号 ${d.tagNo || tagRows(d)[0]?.tagNo || "—"} · EPC ${d.epc || "—"}`}
+              {tagRows(d).length <= 1 && (d.lineName || d.procName || d.areaName) ? ` · ${placeText(d)}` : ""}
             </span>
           </div>
           <div className="tb-wrap" style={{ maxHeight: 360 }}>
@@ -64,6 +89,7 @@ export default function Raw({ project, toast }) {
                 <tr>
                   <th className="num">序号</th>
                   <th>时间戳</th>
+                  <th>标签编号</th>
                   <th>EPC</th>
                   <th>产线</th>
                   <th>工序</th>
@@ -79,18 +105,39 @@ export default function Raw({ project, toast }) {
                       {r.ts}
                       {r.test ? <span className="src-edited" style={{ marginLeft: 6 }}>测试</span> : null}
                     </td>
-                    <td className="mono">{r.epc || "—"}</td>
-                    <td title={r.lineCode || ""}>
-                      {r.lineName || r.lineCode || "—"}
-                      {r.lineCode && r.lineName ? <div className="src-sub mono">{r.lineCode}</div> : null}
+                    <td className="mono">
+                      {tagRows(r).length ? tagRows(r).map((t, i) => (
+                        <div key={i}>{t.tagNo || "—"}</div>
+                      )) : "—"}
                     </td>
-                    <td title={r.procCode || ""}>
-                      {r.procName || r.procCode || "—"}
-                      {r.procCode && r.procName ? <div className="src-sub mono">{r.procCode}</div> : null}
+                    <td className="mono">
+                      {tagRows(r).length ? tagRows(r).map((t, i) => (
+                        <div key={i}>{t.epc || "—"}</div>
+                      )) : "—"}
                     </td>
-                    <td title={r.areaCode || ""}>
-                      {r.areaName || r.areaCode || "—"}
-                      {r.areaCode && r.areaName ? <div className="src-sub mono">{r.areaCode}</div> : null}
+                    <td>
+                      {tagRows(r).length ? tagRows(r).map((t, i) => (
+                        <div key={i} title={t.lineCode || ""}>
+                          {t.lineName || t.lineCode || (t.procName || t.areaName ? "—" : "未匹配映射")}
+                          {t.lineCode && t.lineName ? <div className="src-sub mono">{t.lineCode}</div> : null}
+                        </div>
+                      )) : "—"}
+                    </td>
+                    <td>
+                      {tagRows(r).length ? tagRows(r).map((t, i) => (
+                        <div key={i} title={t.procCode || ""}>
+                          {t.procName || t.procCode || "—"}
+                          {t.procCode && t.procName ? <div className="src-sub mono">{t.procCode}</div> : null}
+                        </div>
+                      )) : "—"}
+                    </td>
+                    <td>
+                      {tagRows(r).length ? tagRows(r).map((t, i) => (
+                        <div key={i} title={t.areaCode || ""}>
+                          {t.areaName || t.areaCode || "—"}
+                          {t.areaCode && t.areaName ? <div className="src-sub mono">{t.areaCode}</div> : null}
+                        </div>
+                      )) : "—"}
                     </td>
                     <td className="mono">{r.hex}</td>
                   </tr>
@@ -100,7 +147,7 @@ export default function Raw({ project, toast }) {
             {!d.items.length ? <div className="empty">该设备暂无上报记录。</div> : null}
           </div>
           <div className="hint" style={{ marginTop: 12 }}>
-            共 {d.n} 条记录 · EPC 按映射表解析产线 / 工序 / 区域；未命中映射时显示「—」。本页只读，不提供编辑 / 删除入口。
+            共 {d.n} 条记录 · 一条 HEX 中的多个标签会全部解析，并按映射表标注标签编号与产线 / 工序 / 区域；未命中映射时显示「未匹配映射」。本页只读，不提供编辑 / 删除入口。
           </div>
         </Modal>
       );
@@ -152,7 +199,7 @@ export default function Raw({ project, toast }) {
       <div className="kicker">模块 B · 项目内部 · 只读</div>
       <h1 className="page-title">原始数据监控（RFID 设备 EPC 数据）</h1>
       <p className="sec-sub">
-        数据来自 MQTT 主题 <b>dev/coo/+</b>，按报文 <b>dev</b> 字段归属本项目。仅展示各读卡设备上报的原始 HEX，并按映射表标注 EPC 对应的产线 / 工序 / 区域；只读、不可编辑或删除。
+        数据来自 MQTT 主题 <b>dev/coo/+</b>，按报文 <b>dev</b> 字段归属本项目。仅展示各读卡设备上报的原始 HEX，并按映射表标注标签编号与产线 / 工序 / 区域；只读、不可编辑或删除。
         {mqtt ? (
           <span className={"tag " + (mqtt.connected ? "ok" : mqtt.enabled ? "err" : "")} style={{ marginLeft: 8 }}>
             {mqtt.connected ? "MQTT 已连接" : mqtt.enabled ? "MQTT 未连接" : "MQTT 已关闭"}
@@ -160,7 +207,7 @@ export default function Raw({ project, toast }) {
         ) : null}
       </p>
       <div className="toolbar">
-        <input className="search" placeholder="搜索设备 / EPC / 产线 / 工序 / 区域" value={q} onChange={(e) => setQ(e.target.value)} />
+        <input className="search" placeholder="搜索设备 / 标签编号 / EPC / 产线 / 工序 / 区域" value={q} onChange={(e) => setQ(e.target.value)} />
         <div style={{ flex: 1 }} />
         <label className="chk">
           <input type="checkbox" style={{ width: 13, height: 13 }} checked={auto} onChange={(e) => setAuto(e.target.checked)} />
@@ -183,7 +230,7 @@ export default function Raw({ project, toast }) {
           <div className={"dev" + (d.on ? "" : " off")} key={d.id} onClick={() => openDev(d.id)}>
             <div className="id"><span className={"led" + (d.on ? " on" : "")} />{d.id}</div>
             <div className="hex">{d.hex || "—"}</div>
-            <div className="place">{placeText(d)}</div>
+            <TagLines row={d} />
             <div className="foot">
               <span>{d.tz} · {d.seat}</span>
               <span>{d.n} 条 · {d.last && d.last !== "—" ? d.last.slice(11, 16) : "—"}</span>

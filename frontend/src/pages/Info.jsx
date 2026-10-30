@@ -281,7 +281,7 @@ function Mapping({ p, setProject, toast, q, setQ, mapTab, setMapTab, setModal, s
           ))}
         </div>
       )}
-      {mapTab === 1 && <div className="alert">两级映射：位置 → 蓝牙标签编号 → 多个 EPC。读到任一 EPC 即可定位。</div>}
+      {mapTab === 1 && <div className="alert">两级映射：位置 → 蓝牙标签编号 → 多个 EPC。读到任一 EPC 即可定位。未绑定位置的编号在「备用 · 备用标签」中。</div>}
       <div className="card pad0">
         <div className="tb-wrap">
           <table className="tb">

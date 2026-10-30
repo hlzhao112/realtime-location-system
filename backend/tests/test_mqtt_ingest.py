@@ -57,6 +57,27 @@ class MqttCodecTests(unittest.TestCase):
             ["E28068940000402C63E66442"],
         )
 
+    def test_extract_every_tag_in_concatenated_frames(self):
+        hex_data = (
+            "BB02220011CB3000E2806894000050358004A90AB22A267E"
+            "BB02220011C53000E2806894000050358004B10A38F0747E"
+            "BB02220011B43000E2806894000040358004AD0A646AF57E"
+        )
+        self.assertEqual(
+            extract_epcs(hex_data, []),
+            [
+                "E2806894000050358004A90A",
+                "E2806894000050358004B10A",
+                "E2806894000040358004AD0A",
+            ],
+        )
+
+    def test_extract_plain_epc_list_without_frame(self):
+        self.assertEqual(
+            extract_epcs("E2806894000040358004310A E2806894000050358004350A", []),
+            ["E2806894000040358004310A", "E2806894000050358004350A"],
+        )
+
 
 class MqttProjectMapTests(unittest.TestCase):
     def setUp(self):

@@ -14,13 +14,57 @@ from .customer import movement_status
 from .hooks import ParseContext, after_location_updated, after_parse
 
 
-def extract_epcs(hex_data: str, epcs: list[str]) -> list[str]:
-    vals = [norm_epc(x) for x in epcs if norm_epc(x)]
-    if vals:
-        return vals
-    compact = norm_epc(hex_data)
-    if not compact:
-        return []
+def _epc_from_bb_frame(frame: str) -> str:
+    """从一帧 BB..7E 里按 PC 字长取出 EPC。RSSI(1) + PC(2) + EPC + CRC(2)。"""
+    if len(frame) < 24:
+        return ""
+    try:
+        pc = int(frame[12:16], 16)
+    except ValueError:
+        return ""
+    words = (pc >> 11) & 0x1F
+    nbytes = words * 2
+    if nbytes < 4 or nbytes > 32:
+        nbytes = 12
+    start = 16
+    end = start + nbytes * 2
+    if end + 8 > len(frame):
+        return ""
+    epc = frame[start:end]
+    if any(c not in "0123456789ABCDEF" for c in epc):
+        return ""
+    return epc
+
+
+def _epcs_from_bb_frames(compact: str) -> list[str]:
+    """现场报文常把多帧 BB0222..7E 直接拼在同一个 hex 里，每帧一个标签。"""
+    found: list[str] = []
+    i = 0
+    n = len(compact)
+    while i + 12 <= n:
+        if compact[i : i + 2] != "BB":
+            i += 2
+            continue
+        try:
+            payload_len = int(compact[i + 6 : i + 10], 16)
+        except ValueError:
+            i += 2
+            continue
+        if payload_len < 5 or payload_len > 80:
+            i += 2
+            continue
+        hex_len = (5 + payload_len + 2) * 2
+        if i + hex_len > n or compact[i + hex_len - 2 : i + hex_len] != "7E":
+            i += 2
+            continue
+        epc = _epc_from_bb_frame(compact[i : i + hex_len])
+        if epc and epc not in found:
+            found.append(epc)
+        i += hex_len
+    return found
+
+
+def _epcs_from_e2(compact: str) -> list[str]:
     found: list[str] = []
     start = 0
     while True:
@@ -31,6 +75,20 @@ def extract_epcs(hex_data: str, epcs: list[str]) -> list[str]:
         if chunk not in found:
             found.append(chunk)
         start = i + 24
+    return found
+
+
+def extract_epcs(hex_data: str, epcs: list[str]) -> list[str]:
+    vals = [norm_epc(x) for x in epcs if norm_epc(x)]
+    if vals:
+        return vals
+    compact = norm_epc(hex_data)
+    if not compact:
+        return []
+    framed = _epcs_from_bb_frames(compact)
+    if framed:
+        return framed
+    found = _epcs_from_e2(compact)
     if found:
         return found
     # 常见 EPC 96bit = 24 hex chars；按 24 切分，剩余整段也保留
@@ -65,13 +123,14 @@ def apply_report(
     when = ts or datetime.now(timezone.utc)
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
+    parsed_epcs = extract_epcs(hex_data, epcs)
 
     db.add(
         RawReport(
             project_id=project.id,
             device_id=device_id,
-            hex_data=hex_data or " ".join(pretty_epc(x) for x in epcs),
-            epcs=epcs,
+            hex_data=hex_data or " ".join(pretty_epc(x) for x in parsed_epcs),
+            epcs=parsed_epcs,
             report_day=when.astimezone().strftime("%Y-%m-%d"),
             test=test,
             ts=when,
@@ -83,7 +142,7 @@ def apply_report(
 
     hit = None
     used = ""
-    for e in extract_epcs(hex_data, epcs):
+    for e in parsed_epcs:
         found = lookup_epc(cache, e)
         if found:
             hit = found

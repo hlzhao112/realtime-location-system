@@ -9,6 +9,7 @@ from ..deps import get_current_user
 from ..schemas import CheckItem, DiffRow, PreviewRow, TagImportPreview, TrolleyImportPreview, TrolleyOut
 from ..services.cache import rebuild_project_cache
 from ..services.excel_io import (
+    attach_unused_nos,
     build_lines_from_pos,
     build_template,
     export_nos,
@@ -52,13 +53,16 @@ def _tag_preview(pos_bytes: bytes, no_bytes: bytes, current=None) -> TagImportPr
                     column="蓝牙标签编号",
                 )
             )
-        unused = [k for k in no_map if k not in used]
+        unused = attach_unused_nos(lines, no_map, used)
         if unused:
             checks.append(
                 CheckItem(
                     level="warn",
-                    title="编号表存在未被引用的编号",
-                    detail=f"{', '.join(unused[:12])}{'…' if len(unused) > 12 else ''}（{len(unused)} 个）作为备用标签不导入",
+                    title="编号表存在未被位置引用的编号",
+                    detail=(
+                        f"{', '.join(unused[:12])}{'…' if len(unused) > 12 else ''}"
+                        f"（{len(unused)} 个）已全部导入到「备用 · 备用标签」区域"
+                    ),
                 )
             )
         ok = not any(c.level == "err" for c in checks)
@@ -66,8 +70,8 @@ def _tag_preview(pos_bytes: bytes, no_bytes: bytes, current=None) -> TagImportPr
             "line": len(lines),
             "proc": sum(len(l["procs"]) for l in lines),
             "area": sum(len(g["areas"]) for l in lines for g in l["procs"]),
-            "no": sum(len(a["nos"]) for l in lines for g in l["procs"] for a in g["areas"]),
-            "epc": sum(len(used.get(no, [])) for l in lines for g in l["procs"] for a in g["areas"] for no in a["nos"]),
+            "no": len(used),
+            "epc": sum(len(epcs) for epcs in used.values()),
         }
         n = 0
         for l in lines:
@@ -91,10 +95,11 @@ def _tag_preview(pos_bytes: bytes, no_bytes: bytes, current=None) -> TagImportPr
                         )
                         n += 1
         if ok:
-            payload = {"lines": lines, "tagNos": used}
+            payload = {"lines": lines, "tagNos": dict(no_map)}
             checks.insert(0, CheckItem(level="ok", title="位置-编号映射表表头", detail=f"7 列齐全，{len(pos_rows)} 行有效数据"))
             checks.insert(1, CheckItem(level="ok", title="编号-映射表表头", detail=f"2 列齐全，{len(no_map)} 个编号"))
             checks.insert(2, CheckItem(level="ok", title="标签编号均已定义", detail="位置表引用的编号都能在编号表中找到 EPC"))
+            checks.insert(3, CheckItem(level="ok", title="编号表 EPC 全量导入", detail=f"共 {len(no_map)} 个编号 / {stats['epc']} 条 EPC"))
     cur = current or {"line": 0, "proc": 0, "area": 0, "no": 0, "epc": 0, "trolley": 0}
     diff = [
         DiffRow(**x)

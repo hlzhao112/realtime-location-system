@@ -332,6 +332,47 @@ def build_lines_from_pos(pos_rows: list[dict], no_map: dict[str, list[str]]) -> 
     return lines, used, undefined
 
 
+SPARE_LINE_ID = "BACKUP"
+SPARE_LINE_NAME = "备用"
+SPARE_PROC_CODE = "BACKUP"
+SPARE_PROC_NAME = "未绑定位置"
+SPARE_AREA_ID = "SPARE"
+SPARE_AREA_NAME = "备用标签"
+
+
+def attach_unused_nos(lines: list[dict], no_map: dict[str, list[str]], used: dict[str, list[str]]) -> list[str]:
+    """把编号表中未被位置表引用的编号挂到「备用 · 备用标签」区域，保证 EPC 全量入库。"""
+    unused = [k for k in no_map if k not in used]
+    if not unused:
+        return []
+    line = next((item for item in lines if item.get("id") == SPARE_LINE_ID), None)
+    if line is None:
+        line = {"id": SPARE_LINE_ID, "name": SPARE_LINE_NAME, "procs": []}
+        lines.append(line)
+    proc = next(
+        (item for item in line["procs"] if item.get("code") == SPARE_PROC_CODE and item.get("name") == SPARE_PROC_NAME),
+        None,
+    )
+    if proc is None:
+        proc = {
+            "code": SPARE_PROC_CODE,
+            "name": SPARE_PROC_NAME,
+            "order": len(line["procs"]) + 1,
+            "areas": [],
+        }
+        line["procs"].append(proc)
+    area = next((item for item in proc["areas"] if item.get("id") == SPARE_AREA_ID), None)
+    if area is None:
+        area = {"id": SPARE_AREA_ID, "name": SPARE_AREA_NAME, "nos": [], "epcs": []}
+        proc["areas"].append(area)
+    for no in unused:
+        if no not in area["nos"]:
+            area["nos"].append(no)
+        used[no] = no_map[no]
+        area["epcs"].extend(no_map[no])
+    return unused
+
+
 def _style_header(ws: Worksheet, headers: list[str], widths: list[int]):
     ws.append(headers)
     for i, w in enumerate(widths, start=1):
@@ -384,6 +425,7 @@ def build_template(kind: str) -> bytes:
                 "同一编号只在首行填写 No.，下方行编号列留空表示延续上一编号。",
                 "一个编号可对应多条 EPC；读到任一 EPC 即可定位到该编号所属区域。",
                 "位置表引用但本表未定义的编号会阻止导入。",
+                "本表有但位置表未引用的编号会全部导入，并归入「备用 · 备用标签」区域，可稍后绑定到位置。",
             ],
         )
     else:

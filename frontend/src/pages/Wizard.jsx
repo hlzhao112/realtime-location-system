@@ -516,7 +516,7 @@ function ImportModal({ kind, draft, setDraft, toast, onClose }) {
         <button className="btn primary" disabled={!prev?.ok} onClick={apply}>确认覆盖导入</button></>}>
       {kind === "tags" ? (
         <>
-          <div className="alert">需要两个文件：位置-编号映射表 + 编号-映射表。缺一不可。预览接口需要项目已存在 PID；新建时建议先保存 Step1 或创建后再在项目信息中导入。</div>
+          <div className="alert">需要两个文件：位置-编号映射表 + 编号-映射表。缺一不可。编号表中的 EPC 全部导入；位置表未引用的编号会归入「备用 · 备用标签」。预览接口需要项目已存在 PID；新建时建议先保存 Step1 或创建后再在项目信息中导入。</div>
           <Slot title="① 位置-编号映射表" file={pos} onFile={setPos} kind="pos" />
           <Slot title="② 编号-映射表" file={no} onFile={setNo} kind="no" />
         </>

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, downloadAuth } from "../api";
 import { Modal } from "../ui";
 
 function todayStr() {
@@ -25,6 +25,85 @@ function tagRows(row) {
   return [];
 }
 
+const PAGE_SIZE = 200;
+
+function sortedOpts(map) {
+  return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1], "zh"));
+}
+
+function HeaderFilter({ value, onChange, options, placeholder }) {
+  return (
+    <select
+      className={"input th-filter" + (value ? " on" : "")}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    >
+      <option value="">{placeholder}</option>
+      {options.map(([v, label]) => (
+        <option key={v} value={v}>{label}</option>
+      ))}
+    </select>
+  );
+}
+
+function tagPlaces(tags) {
+  const out = [];
+  const seen = new Set();
+  (tags || []).forEach((t) => {
+    const key = [t.pn, t.pc, t.line, t.lineName, t.area, t.areaName].join("|");
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(t);
+  });
+  return out;
+}
+
+function rowMatches(row, colF) {
+  if (colF.tz && row.tz !== colF.tz) return false;
+  const tags = row.tags?.length ? row.tags : [{}];
+  return tags.some((t) =>
+    (!colF.pc || t.pc === colF.pc)
+    && (!colF.line || t.line === colF.line)
+    && (!colF.area || t.area === colF.area)
+  );
+}
+
+function visiblePlaces(row, colF) {
+  return tagPlaces(
+    (row.tags || []).filter((t) =>
+      (!colF.pc || t.pc === colF.pc)
+      && (!colF.line || t.line === colF.line)
+      && (!colF.area || t.area === colF.area)
+    )
+  );
+}
+
+function placeMapped(t) {
+  return Boolean(t?.pc || t?.pn || t?.line || t?.area || String(t?.areaName || "").trim());
+}
+
+function shownPlaces(row, colF, hideUnmatched) {
+  const places = visiblePlaces(row, colF);
+  return hideUnmatched ? places.filter(placeMapped) : places;
+}
+
+function placeKey(row, colF, hideUnmatched) {
+  const loc = shownPlaces(row, colF, hideUnmatched).map((t) => [t.pc, t.line, t.area].join(":")).join("||");
+  return `${row.tz}|${loc}`;
+}
+
+function mergeConsecutive(rows, colF, hideUnmatched) {
+  const out = [];
+  let prev = null;
+  rows.forEach((row) => {
+    const key = placeKey(row, colF, hideUnmatched);
+    if (key === prev) return;
+    prev = key;
+    out.push(row);
+  });
+  return out;
+}
+
 function TagLines({ row }) {
   const tags = tagRows(row);
   if (!tags.length) return <div className="place">未匹配映射</div>;
@@ -43,19 +122,36 @@ function TagLines({ row }) {
 
 export default function Raw({ project, toast }) {
   const [day, setDay] = useState(todayStr());
+  const [recFrom, setRecFrom] = useState(todayStr());
+  const [recTo, setRecTo] = useState(todayStr());
+  const [pickDay, setPickDay] = useState("");
+  const [loadedRange, setLoadedRange] = useState("");
+  const loadSeq = useRef(0);
+  const appliedRange = useRef("");
   const [q, setQ] = useState("");
   const [auto, setAuto] = useState(false);
   const [data, setData] = useState({ devices: [], stats: { active: 0, inactive: 0, total: 0, today: 0 } });
   const [modal, setModal] = useState(null);
   const [mqtt, setMqtt] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [merge, setMerge] = useState(false);
+  const [hideUnmatched, setHideUnmatched] = useState(false);
+  const [colF, setColF] = useState({ tz: "", line: "", area: "", pc: "" });
+  const [page, setPage] = useState(1);
   const pid = project.pid;
 
   const load = useCallback(async () => {
-    const [r, m] = await Promise.all([api.raw(pid, day, q), api.mqttStatus().catch(() => null)]);
+    const seq = ++loadSeq.current;
+    const rangeKey = `${recFrom}|${recTo}`;
+    const [r, m] = await Promise.all([
+      api.raw(pid, day, q, { recordFrom: recFrom, recordTo: recTo }),
+      api.mqttStatus().catch(() => null),
+    ]);
+    if (seq !== loadSeq.current) return;
     setData(r);
+    setLoadedRange(rangeKey);
     if (m) setMqtt(m);
-  }, [pid, day, q]);
+  }, [pid, day, q, recFrom, recTo]);
 
   useEffect(() => {
     load().catch((e) => toast(e.message));
@@ -193,6 +289,110 @@ export default function Raw({ project, toast }) {
     }
   }
 
+  const records = data.records || [];
+  const dayCounts = useMemo(() => {
+    const map = new Map();
+    records.forEach((r) => {
+      const d = (r.time || "").slice(0, 10);
+      if (d) map.set(d, (map.get(d) || 0) + 1);
+    });
+    return [...map.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  }, [records]);
+  const filtered = useMemo(() => {
+    const matched = records.filter((r) => {
+      if (pickDay && !(r.time || "").startsWith(pickDay)) return false;
+      if (!rowMatches(r, colF)) return false;
+      if (hideUnmatched && !shownPlaces(r, colF, true).length) return false;
+      return true;
+    });
+    return merge ? mergeConsecutive(matched, colF, hideUnmatched) : matched;
+  }, [records, colF, merge, pickDay, hideUnmatched]);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pageRows = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const showPager = filtered.length > PAGE_SIZE;
+
+  useEffect(() => {
+    setPage(1);
+  }, [day, q, pid, recFrom, recTo, pickDay]);
+
+  useEffect(() => {
+    const start = recFrom && recTo && recFrom > recTo ? recTo : recFrom;
+    const end = recFrom && recTo && recFrom > recTo ? recFrom : recTo;
+    const key = `${recFrom}|${recTo}`;
+    if (!start || !end || start === end || loadedRange !== key || appliedRange.current === key) return;
+    appliedRange.current = key;
+    const days = dayCounts.map(([d]) => d);
+    if (days.includes(start)) {
+      setPickDay(start);
+      return;
+    }
+    setPickDay(days.find((d) => d >= start) || days[0] || "");
+  }, [loadedRange, recFrom, recTo, dayCounts]);
+
+  function changeRange(which, value) {
+    const nextFrom = which === "from" ? value : recFrom;
+    const nextTo = which === "to" ? value : recTo;
+    if (which === "from") setRecFrom(value);
+    else setRecTo(value);
+    const start = nextFrom && nextTo && nextFrom > nextTo ? nextTo : nextFrom;
+    const end = nextFrom && nextTo && nextFrom > nextTo ? nextFrom : nextTo;
+    setPickDay(start && end && start !== end ? start : "");
+    setPage(1);
+  }
+
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
+  const pcOpts = useMemo(() => {
+    const seen = new Map();
+    (project.lines || []).forEach((l) => {
+      (l.procs || []).forEach((g) => {
+        if (g.code) seen.set(g.code, `${g.name || ""} ${g.code}`.trim());
+      });
+    });
+    records.forEach((r) => (r.tags || []).forEach((t) => {
+      if (t.pc && !seen.has(t.pc)) seen.set(t.pc, `${t.pn || ""} ${t.pc}`.trim());
+    }));
+    return sortedOpts(seen);
+  }, [records, project.lines]);
+  const tzOpts = useMemo(() => {
+    const seen = new Map();
+    records.forEach((r) => {
+      if (r.tz && r.tz !== "—") seen.set(r.tz, `${r.tz} ${r.seat || ""}`.trim());
+    });
+    return sortedOpts(seen);
+  }, [records]);
+  const lineOpts = useMemo(() => {
+    const seen = new Map();
+    (project.lines || []).forEach((l) => {
+      if (l.id) seen.set(l.id, l.name ? `${l.name} ${l.id}` : l.id);
+    });
+    records.forEach((r) => (r.tags || []).forEach((t) => {
+      if (t.line && !seen.has(t.line)) seen.set(t.line, t.lineName ? `${t.lineName} ${t.line}` : t.line);
+    }));
+    return sortedOpts(seen);
+  }, [records, project.lines]);
+  const areaOpts = useMemo(() => {
+    const seen = new Map();
+    (project.lines || []).forEach((l) => {
+      (l.procs || []).forEach((g) => {
+        (g.areas || []).forEach((a) => {
+          if (a?.id) seen.set(a.id, String(a.name || "").trim() || a.id);
+        });
+      });
+    });
+    records.forEach((r) => (r.tags || []).forEach((t) => {
+      if (t.area && !seen.has(t.area)) seen.set(t.area, String(t.areaName || "").trim() || t.area);
+    }));
+    return sortedOpts(seen);
+  }, [records, project.lines]);
+
+  function applyColF(key, value) {
+    setColF((f) => ({ ...f, [key]: value }));
+    setPage(1);
+  }
+
   const s = data.stats || {};
   return (
     <div>
@@ -238,6 +438,125 @@ export default function Raw({ project, toast }) {
           </div>
         ))}
         {!(data.devices || []).length ? <div className="empty">无匹配设备。</div> : null}
+      </div>
+
+      <div className="mt24">
+        <div className="sec-h">台座原始数据</div>
+        <p className="sec-t">各台座读卡器收到的原始上报，按识别时间倒序。日期范围只筛选这张表，上方 EPC 看板不受影响。跨多天时先显示开始那天，可再切换其他日期。</p>
+      </div>
+      <div className="toolbar">
+        <label className="mini-note" style={{ margin: 0 }}>开始</label>
+        <input className="input" type="date" value={recFrom} onChange={(e) => changeRange("from", e.target.value)} style={{ width: 152, height: 32 }} />
+        <label className="mini-note" style={{ margin: 0 }}>结束</label>
+        <input className="input" type="date" value={recTo} onChange={(e) => changeRange("to", e.target.value)} style={{ width: 152, height: 32 }} />
+        <button className="btn sm" onClick={() => { setMerge((m) => !m); setPage(1); toast(merge ? "已关闭合并，展示全部记录" : "已启用合并：同台车同位置连续相同数据合并为一条"); }}>{merge ? "✓ 合并连续重复" : "合并连续重复"}</button>
+        <button className="btn sm" onClick={() => { setHideUnmatched((v) => !v); setPage(1); toast(hideUnmatched ? "已显示未匹配映射数据" : "已隐藏未匹配映射数据"); }}>{hideUnmatched ? "✓ 已隐藏未匹配映射" : "过滤未匹配映射"}</button>
+        <button className="btn sm" onClick={() => { setColF({ tz: "", line: "", area: "", pc: "" }); setPage(1); }}>重置</button>
+        <button
+          className="btn sm"
+          onClick={() =>
+            downloadAuth(
+              api.exportRawUrl(pid, {
+                q,
+                recordFrom: recFrom,
+                recordTo: recTo,
+                day: pickDay,
+                tz: colF.tz,
+                line: colF.line,
+                area: colF.area,
+                pc: colF.pc,
+                merge,
+                hideUnmatched,
+              }),
+              `${pid}-raw-records.xlsx`
+            )
+              .then(() => toast("已导出当前筛选结果 raw-records.xlsx"))
+              .catch((e) => toast(e.message))
+          }
+        >
+          ⤒ 导出 Excel
+        </button>
+        <div style={{ flex: 1 }} />
+        <span className="mini-note" style={{ margin: 0 }}>{pickDay ? `${pickDay} · ` : ""}共 {filtered.length} 条</span>
+      </div>
+      {dayCounts.length > 1 ? (
+        <div className="toolbar">
+          <button className={"btn sm" + (pickDay ? "" : " primary")} onClick={() => { setPickDay(""); setPage(1); }}>全部 {records.length}</button>
+          {dayCounts.map(([d, n]) => (
+            <button key={d} className={"btn sm" + (pickDay === d ? " primary" : "")} onClick={() => { setPickDay(d); setPage(1); }}>
+              {d.slice(5)} · {n}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <div className="card pad0">
+        <div className="tb-wrap" style={{ maxHeight: 840 }}>
+          <table className="tb">
+            <thead>
+              <tr>
+                <th className="filterable">
+                  台车
+                  <HeaderFilter value={colF.tz} onChange={(v) => applyColF("tz", v)} options={tzOpts} placeholder="全部台车" />
+                </th>
+                <th className="num">序号</th>
+                <th className="filterable">
+                  识别工序
+                  <HeaderFilter value={colF.pc} onChange={(v) => applyColF("pc", v)} options={pcOpts} placeholder="全部工序" />
+                </th>
+                <th className="filterable">
+                  产品线
+                  <HeaderFilter value={colF.line} onChange={(v) => applyColF("line", v)} options={lineOpts} placeholder="全部产品线" />
+                </th>
+                <th className="filterable">
+                  区域
+                  <HeaderFilter value={colF.area} onChange={(v) => applyColF("area", v)} options={areaOpts} placeholder="全部区域" />
+                </th>
+                <th>识别时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pageRows.map((r, i) => {
+                const places = shownPlaces(r, colF, hideUnmatched);
+                const lines = places.length ? places : [{}];
+                return (
+                  <tr key={r.id}>
+                    <td className="mono">{r.tz} <span style={{ fontFamily: "var(--sans)", color: "var(--t2)" }}>{r.seat}</span></td>
+                    <td className="num">{(page - 1) * PAGE_SIZE + i + 1}</td>
+                    <td>
+                      {lines.map((t, j) => (
+                        <div key={j}>
+                          {t.pn || t.pc ? <>{t.pn || "—"} <span className="mono" style={{ color: "var(--t3)" }}>{t.pc}</span></> : "未匹配映射"}
+                        </div>
+                      ))}
+                    </td>
+                    <td className="mono">
+                      {lines.map((t, j) => (
+                        <div key={j}>{t.line || "未匹配映射"}</div>
+                      ))}
+                    </td>
+                    <td>
+                      {lines.map((t, j) => (
+                        <div key={j}>{String(t.areaName || "").trim() || (t.area ? t.area : "未匹配映射")}</div>
+                      ))}
+                    </td>
+                    <td className="mono">
+                      {r.time}
+                      {r.test ? <span className="src-edited" style={{ marginLeft: 6 }}>测试</span> : null}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {!filtered.length ? <div className="empty">无匹配原始数据。</div> : null}
+        </div>
+        {showPager ? (
+          <div className="pager">
+            <button className="btn sm" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>上一页</button>
+            <span>第 {page} / {pageCount} 页 · 共 {filtered.length} 条</span>
+            <button className="btn sm" disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>下一页</button>
+          </div>
+        ) : null}
       </div>
       {modal}
     </div>

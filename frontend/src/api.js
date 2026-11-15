@@ -156,14 +156,32 @@ export const api = {
   mqttRawRefresh: () => request("/api/v1/mqtt/raw/refresh", { method: "POST", timeoutMs: 30000 }),
   rawRefetch: (pid) =>
     request(`/api/v1/projects/${pid}/raw/refetch`, { method: "POST", timeoutMs: 30000 }),
-  raw: (pid, day = "", q = "") =>
-    request(`/api/v1/projects/${pid}/raw?day=${encodeURIComponent(day)}&q=${encodeURIComponent(q)}`),
+  raw: (pid, day = "", q = "", extra = {}) => {
+    const params = new URLSearchParams({ day, q });
+    if (extra.recordFrom) params.set("recordFrom", extra.recordFrom);
+    if (extra.recordTo) params.set("recordTo", extra.recordTo);
+    return request(`/api/v1/projects/${pid}/raw?${params}`);
+  },
   rawDevice: (pid, id, day = "") =>
     request(`/api/v1/projects/${pid}/raw/devices/${encodeURIComponent(id)}?day=${encodeURIComponent(day)}`),
   logs: (pid, q = "") => request(`/api/v1/projects/${pid}/logs?q=${encodeURIComponent(q)}`),
   clearLogs: (pid) => request(`/api/v1/projects/${pid}/logs`, { method: "DELETE" }),
   exportPushesUrl: (pid, q, merge, extra = {}) =>
     `/api/v1/projects/${pid}/pushes/export?${pushQuery(q, merge, extra)}`,
+  exportRawUrl: (pid, extra = {}) => {
+    const params = new URLSearchParams();
+    if (extra.q) params.set("q", extra.q);
+    if (extra.recordFrom) params.set("recordFrom", extra.recordFrom);
+    if (extra.recordTo) params.set("recordTo", extra.recordTo);
+    if (extra.day) params.set("day", extra.day);
+    if (extra.tz) params.set("tz", extra.tz);
+    if (extra.line) params.set("line", extra.line);
+    if (extra.area) params.set("area", extra.area);
+    if (extra.pc) params.set("pc", extra.pc);
+    if (extra.merge) params.set("merge", "true");
+    if (extra.hideUnmatched) params.set("hideUnmatched", "true");
+    return `/api/v1/projects/${pid}/raw/export?${params}`;
+  },
   exportLogsUrl: (pid, q) => `/api/v1/projects/${pid}/logs/export?q=${encodeURIComponent(q || "")}`,
 };
 

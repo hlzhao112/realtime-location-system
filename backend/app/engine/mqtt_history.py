@@ -166,7 +166,7 @@ def refetch_project_history(db: Session, project: Project) -> dict:
         ingested = 0
         for item in matched:
             try:
-                result = ingest_mqtt_message(item["topic"], item["payload"])
+                result = ingest_mqtt_message(item["topic"], item["payload"], replay=False)
                 if result.get("ok"):
                     ingested += 1
             except Exception:

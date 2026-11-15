@@ -1482,7 +1482,212 @@ def resolve_raw_place(project: Project, db: Session, hex_data: str = "", epcs: O
     return base
 
 
-def raw_payload(db: Session, project: Project, day: str = "", q: str = "") -> dict:
+def _raw_record(report: RawReport, meta: dict, place: dict) -> dict:
+    tags = place.get("tags") or []
+    return {
+        "id": report.id,
+        "reader": report.device_id,
+        "tz": meta["tz"],
+        "seat": meta["seat"],
+        "time": fmt_local(report.ts, ms=True),
+        "test": bool(report.test),
+        "hex": report.hex_data or "",
+        "tags": [
+            {
+                "pc": t.get("procCode") or "",
+                "pn": t.get("procName") or "",
+                "line": t.get("lineCode") or "",
+                "lineName": t.get("lineName") or "",
+                "area": t.get("areaCode") or "",
+                "areaName": t.get("areaName") or "",
+                "epc": t.get("epc") or "",
+                "tagNo": t.get("tagNo") or "",
+            }
+            for t in tags
+        ],
+    }
+
+
+def _raw_visible_tags(rec: dict, line: str, area: str, pc: str) -> list[dict]:
+    tags = [
+        t
+        for t in (rec.get("tags") or [])
+        if (not pc or t.get("pc") == pc) and (not line or t.get("line") == line) and (not area or t.get("area") == area)
+    ]
+    out = []
+    seen = set()
+    for t in tags:
+        key = (t.get("pn"), t.get("pc"), t.get("line"), t.get("lineName"), t.get("area"), t.get("areaName"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
+def _raw_record_matches(rec: dict, qn: str, tz: str, line: str, area: str, pc: str) -> bool:
+    if tz and rec.get("tz") != tz:
+        return False
+    tags = rec.get("tags") or [{}]
+    if not any((not pc or t.get("pc") == pc) and (not line or t.get("line") == line) and (not area or t.get("area") == area) for t in tags):
+        return False
+    if not qn:
+        return True
+    hay = " ".join(
+        [
+            rec.get("reader") or "",
+            rec.get("tz") or "",
+            rec.get("seat") or "",
+            rec.get("time") or "",
+            rec.get("hex") or "",
+            " ".join(
+                " ".join(
+                    [
+                        t.get("pc") or "",
+                        t.get("pn") or "",
+                        t.get("line") or "",
+                        t.get("lineName") or "",
+                        t.get("area") or "",
+                        t.get("areaName") or "",
+                        t.get("epc") or "",
+                        t.get("tagNo") or "",
+                    ]
+                )
+                for t in (rec.get("tags") or [])
+            ),
+        ]
+    ).upper()
+    return qn in hay
+
+
+def _tag_mapped(tag: dict) -> bool:
+    return bool(tag.get("pc") or tag.get("pn") or tag.get("line") or tag.get("area") or (tag.get("areaName") or "").strip())
+
+
+def _raw_place_text(tags: list[dict], kind: str) -> str:
+    if not tags:
+        return "未匹配映射"
+    lines = []
+    for t in tags:
+        if kind == "pc":
+            lines.append(f"{t.get('pn') or '—'} {t.get('pc')}".strip() if t.get("pn") or t.get("pc") else "未匹配映射")
+        elif kind == "line":
+            lines.append(t.get("line") or "未匹配映射")
+        else:
+            lines.append((t.get("areaName") or "").strip() or (t.get("area") or "未匹配映射"))
+    return "\n".join(lines)
+
+
+def raw_export_rows(
+    db: Session,
+    project: Project,
+    *,
+    record_from: str = "",
+    record_to: str = "",
+    pick_day: str = "",
+    q: str = "",
+    tz: str = "",
+    line: str = "",
+    area: str = "",
+    pc: str = "",
+    merge: bool = False,
+    hide_unmatched: bool = False,
+) -> list[list]:
+    """All table rows for the active filters. Not limited to the on-screen page or the preview cap."""
+    days = _raw_record_days(pick_day, pick_day) or _raw_record_days(record_from, record_to)
+    devices = {t.reader: {"id": t.reader, "tz": t.tz, "seat": t.name} for t in project.trolleys}
+    reports: list[RawReport] = []
+    for report_day in days:
+        reports.extend(
+            db.scalars(
+                select(RawReport)
+                .where(RawReport.project_id == project.id, RawReport.report_day == report_day)
+                .order_by(RawReport.ts.desc())
+            ).all()
+        )
+    reports.sort(key=lambda row: row.ts.isoformat() if row.ts else "", reverse=True)
+    qn = (q or "").upper()
+    matched = []
+    for report in reports:
+        meta = devices.get(report.device_id) or {"id": report.device_id, "tz": "—", "seat": "未绑定台车"}
+        rec = _raw_record(report, meta, resolve_raw_place(project, db, report.hex_data or "", report.epcs))
+        if not _raw_record_matches(rec, qn, tz, line, area, pc):
+            continue
+        if hide_unmatched and not any(_tag_mapped(t) for t in _raw_visible_tags(rec, line, area, pc)):
+            continue
+        matched.append(rec)
+    if merge:
+        kept = []
+        prev = None
+        for rec in matched:
+            places = [t for t in _raw_visible_tags(rec, line, area, pc) if not hide_unmatched or _tag_mapped(t)]
+            key = rec.get("tz") or ""
+            key += "|" + "||".join(f"{t.get('pc') or ''}:{t.get('line') or ''}:{t.get('area') or ''}" for t in places)
+            if key == prev:
+                continue
+            prev = key
+            kept.append(rec)
+        matched = kept
+    rows = []
+    for i, rec in enumerate(matched, start=1):
+        places = [t for t in _raw_visible_tags(rec, line, area, pc) if not hide_unmatched or _tag_mapped(t)]
+        rows.append(
+            [
+                rec.get("tz") or "",
+                rec.get("seat") or "",
+                i,
+                _raw_place_text(places, "pc"),
+                _raw_place_text(places, "line"),
+                _raw_place_text(places, "area"),
+                rec.get("time") or "",
+            ]
+        )
+    return rows
+
+
+_RAW_RANGE_DAYS = 31
+
+
+def _raw_record_days(start_day: str, end_day: str) -> list[str]:
+    """Inclusive calendar days for the table. A wide range keeps the latest month so earlier days are still queried one by one."""
+
+    def parse(value: str):
+        text = (value or "").strip()
+        if len(text) < 10:
+            return None
+        try:
+            return datetime.strptime(text[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    start = parse(start_day)
+    end = parse(end_day)
+    if start is None and end is None:
+        return []
+    if start is None:
+        start = end
+    if end is None:
+        end = start
+    if end < start:
+        start, end = end, start
+    if (end - start).days > _RAW_RANGE_DAYS:
+        start = end - timedelta(days=_RAW_RANGE_DAYS)
+    days = []
+    cur = start
+    while cur <= end:
+        days.append(cur.isoformat())
+        cur += timedelta(days=1)
+    return days
+
+
+def raw_payload(
+    db: Session,
+    project: Project,
+    day: str = "",
+    q: str = "",
+    record_from: str = "",
+    record_to: str = "",
+) -> dict:
     now = now_utc()
     today = now.astimezone().strftime("%Y-%m-%d")
     qn = (q or "").upper()
@@ -1496,6 +1701,8 @@ def raw_payload(db: Session, project: Project, day: str = "", q: str = "") -> di
     latest = {}
     counts = {}
     last_ts = {}
+    places = {}
+    records = []
     for r in rows:
         counts[r.device_id] = counts.get(r.device_id, 0) + 1
         if r.device_id not in latest:
@@ -1503,17 +1710,47 @@ def raw_payload(db: Session, project: Project, day: str = "", q: str = "") -> di
             last_ts[r.device_id] = r.ts
         if r.device_id not in devices:
             devices[r.device_id] = {"id": r.device_id, "tz": "—", "seat": "未绑定台车"}
+        place = resolve_raw_place(project, db, r.hex_data or "", r.epcs)
+        places[r.id] = place
+    card_readers = set(devices)
+    start_day = (record_from or "").strip()
+    end_day = (record_to or "").strip()
+    range_days = _raw_record_days(start_day, end_day)
+    if not range_days and day:
+        range_days = _raw_record_days(day, day)
+    record_rows: list[RawReport] = []
+    if range_days:
+        for report_day in range_days:
+            record_rows.extend(
+                db.scalars(
+                    select(RawReport)
+                    .where(RawReport.project_id == project.id, RawReport.report_day == report_day)
+                    .order_by(RawReport.ts.desc())
+                ).all()
+            )
+        record_rows.sort(key=lambda row: row.ts.isoformat() if row.ts else "", reverse=True)
+    else:
+        record_rows = db.scalars(
+            select(RawReport).where(RawReport.project_id == project.id).order_by(RawReport.ts.desc())
+        ).all()
+    for r in record_rows:
+        if r.device_id not in devices:
+            devices[r.device_id] = {"id": r.device_id, "tz": "—", "seat": "未绑定台车"}
+        place = places.get(r.id) or resolve_raw_place(project, db, r.hex_data or "", r.epcs)
+        records.append(_raw_record(r, devices[r.device_id], place))
     window = timedelta(minutes=offline_minutes(project))
     cards = []
     act = 0
     for did, meta in devices.items():
+        if did not in card_readers:
+            continue
         last = latest.get(did)
         ts = last_ts.get(did)
         active = bool(ts and (now - aware(ts)) <= window)
         if active:
             act += 1
         hex_data = last.hex_data if last else ""
-        place = resolve_raw_place(project, db, hex_data, last.epcs if last else None) if last else {
+        place = places.get(last.id) if last else {
             **_empty_raw_tag(),
             "tags": [],
         }
@@ -1572,6 +1809,36 @@ def raw_payload(db: Session, project: Project, day: str = "", q: str = "") -> di
         if qn and qn not in hay:
             continue
         cards.append(item)
+    if qn:
+        kept = []
+        for rec in records:
+            hay = " ".join(
+                [
+                    rec["reader"],
+                    rec["tz"],
+                    rec["seat"],
+                    rec["time"],
+                    rec["hex"],
+                    " ".join(
+                        " ".join(
+                            [
+                                t["pc"],
+                                t["pn"],
+                                t["line"],
+                                t["lineName"],
+                                t["area"],
+                                t["areaName"],
+                                t["epc"],
+                                t["tagNo"],
+                            ]
+                        )
+                        for t in rec["tags"]
+                    ),
+                ]
+            ).upper()
+            if qn in hay:
+                kept.append(rec)
+        records = kept
     total = db.scalar(select(func.count(RawReport.id)).where(RawReport.project_id == project.id)) or 0
     today_n = db.scalar(
         select(func.count(RawReport.id)).where(RawReport.project_id == project.id, RawReport.report_day == today)
@@ -1591,6 +1858,7 @@ def raw_payload(db: Session, project: Project, day: str = "", q: str = "") -> di
             "today": int(today_n),
         },
         "devices": cards,
+        "records": records,
     }
 
 

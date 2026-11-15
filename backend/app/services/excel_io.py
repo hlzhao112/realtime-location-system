@@ -497,13 +497,16 @@ def export_trolleys(trolleys: list[dict]) -> bytes:
     return buf.getvalue()
 
 
-def export_table(title: str, headers: list[str], rows: list[list], widths: list[int] | None = None) -> bytes:
+def export_table(title: str, headers: list[str], rows: list[list], widths: list[int] | None = None, wrap: bool = False) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = (title or "导出")[:31]
     _style_header(ws, headers, widths or [18] * len(headers))
     for row in rows:
         ws.append(row)
+        if wrap:
+            for cell in ws[ws.max_row]:
+                cell.alignment = Alignment(wrap_text=True, vertical="center")
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()

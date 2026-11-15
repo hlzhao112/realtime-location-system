@@ -40,20 +40,31 @@ _CLIENT = None
 
 def mqtt_status() -> dict[str, Any]:
     with _LOCK:
-        return dict(_STATE)
+        data = dict(_STATE)
+    try:
+        from .mqtt_replay import replay_guard
+
+        data.update(replay_guard().stats())
+    except Exception:
+        pass
+    return data
 
 
 def note_result(
     ingested: bool = False,
     skipped: bool = False,
+    skipped_add: int = 0,
     last_dev: str = "",
     error: str | None = None,
 ) -> None:
     with _LOCK:
         if ingested:
             _STATE["ingested"] = int(_STATE["ingested"] or 0) + 1
+        add = int(skipped_add or 0)
         if skipped:
-            _STATE["skipped"] = int(_STATE["skipped"] or 0) + 1
+            add = max(add, 1)
+        if add:
+            _STATE["skipped"] = int(_STATE["skipped"] or 0) + add
         if last_dev:
             _STATE["last_dev"] = last_dev
             _STATE["last_at"] = datetime.now(timezone.utc).isoformat()
@@ -102,7 +113,10 @@ def start_mqtt() -> None:
             else:
                 _STATE["last_error"] = f"MQTT 连接失败 {reason_code}"
         if ok:
-            # QoS 1 + 持久会话：中断期间 broker 会补发未确认报文
+            # QoS 1 + 持久会话会在重连后补发积压。先打开过滤窗口，再订阅。
+            from .mqtt_replay import arm_replay_guard
+
+            arm_replay_guard()
             cli.subscribe(settings.mqtt_topic, qos=1)
 
     def on_disconnect(_cli, _userdata, _flags, reason_code, _properties):
@@ -118,7 +132,7 @@ def start_mqtt() -> None:
         try:
             from .mqtt_ingest import ingest_mqtt_message
 
-            ingest_mqtt_message(msg.topic, msg.payload)
+            ingest_mqtt_message(msg.topic, msg.payload, retain=bool(getattr(msg, "retain", False)))
         except Exception as exc:
             note_result(error=str(exc))
 

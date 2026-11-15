@@ -52,7 +52,7 @@ docker compose up --build
 - HEX 中从 `E2` 起截取 24 位作为 EPC
 - 项目看板可查看全部 MQTT 原始数据（Device ID / 项目名称 / Hex），按项目筛选，并支持手动刷新
 - 项目 PID 全局唯一，且新 PID 不能包含已有项目 PID（例如已有 `OF` 则不能再建 `OF2`）
-- 使用 MQTT v5 持久会话（固定 Client ID、`clean_start=false`、QoS 1）。程序中断后再上线，broker 会补发会话内未确认报文；启动时还会自动回拉 retain / 短时在线路由报文
+- 使用 MQTT v5 持久会话（固定 Client ID、`clean_start=false`、QoS 1）。电脑休眠唤醒或服务重启后，broker 会批量补发积压报文；重连窗口内时间戳一致的大批量回放会被丢弃，窗口结束后继续接收实时数据。MQTT 保留消息不拦截
 
 参数可用环境变量覆盖，见 `.env.example`。健康检查 `GET /api/v1/health` 会返回 MQTT 连接状态。
 

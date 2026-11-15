@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     mqtt_api_url: str = "http://47.109.22.35:18083"
     mqtt_refetch_sec: float = 8.0
     mqtt_session_expiry: int = 604800
+    # 重连后丢弃“时间戳一致”的积压回放。保留消息不走这套过滤。
+    mqtt_replay_burst: int = 30
+    mqtt_replay_hold_sec: float = 1.0
+    mqtt_replay_min_sec: float = 5.0
+    mqtt_replay_quiet_sec: float = 2.0
+    mqtt_replay_max_sec: float = 120.0
 
     templates_dir: Path = ROOT / "templates"
 

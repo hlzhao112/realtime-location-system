@@ -176,7 +176,7 @@ def list_mqtt_events(db: Session, pid: str = "", limit: int = 1000) -> dict:
     return {"items": items, "total": len(items), "pids": pids, "projects": projects}
 
 
-def ingest_mqtt_message(topic: str, payload: bytes | str | None) -> dict:
+def ingest_mqtt_message(topic: str, payload: bytes | str | None, *, retain: bool = False, replay: bool = True) -> dict:
     from .mqtt_client import note_result
     from .runtime import LOCK
 
@@ -184,6 +184,16 @@ def ingest_mqtt_message(topic: str, payload: bytes | str | None) -> dict:
     if not parsed:
         note_result(skipped=True)
         return {"ok": False, "reason": "ignored"}
+
+    if replay:
+        from .mqtt_replay import replay_guard
+
+        decision, dropped = replay_guard().offer(parsed.get("ts"), topic, payload, retain=retain)
+        if decision == "hold":
+            return {"ok": True, "reason": "replay_hold", "dev": parsed["dev"]}
+        if decision == "drop":
+            note_result(skipped_add=dropped, last_dev=parsed["dev"])
+            return {"ok": False, "reason": "replay_backlog", "dev": parsed["dev"]}
 
     db = SessionLocal()
     try:
@@ -235,7 +245,10 @@ def refresh_mqtt_feed(db: Session, timeout_sec: float = 5.0) -> dict:
     burst = collect_mqtt_burst(timeout_sec=timeout_sec)
     retained = collect_emqx_retained()
     collected = 0
-    for topic, payload in list(retained) + list(burst):
+    for topic, payload in retained:
+        ingest_mqtt_message(topic, payload, retain=True)
+        collected += 1
+    for topic, payload in burst:
         ingest_mqtt_message(topic, payload)
         collected += 1
     data = list_mqtt_events(db)

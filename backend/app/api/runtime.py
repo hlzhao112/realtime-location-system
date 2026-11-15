@@ -365,10 +365,60 @@ def get_raw(
     pid: str,
     day: str = "",
     q: str = "",
+    recordFrom: str = "",
+    recordTo: str = "",
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
-    return rt.raw_payload(db, _must(db, pid), day=day, q=q)
+    return rt.raw_payload(
+        db,
+        _must(db, pid),
+        day=day,
+        q=q,
+        record_from=recordFrom,
+        record_to=recordTo,
+    )
+
+
+@router.get("/{pid}/raw/export")
+def export_raw(
+    pid: str,
+    q: str = "",
+    recordFrom: str = "",
+    recordTo: str = "",
+    day: str = "",
+    tz: str = "",
+    line: str = "",
+    area: str = "",
+    pc: str = "",
+    merge: bool = False,
+    hideUnmatched: bool = False,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    p = _must(db, pid)
+    rows = rt.raw_export_rows(
+        db,
+        p,
+        record_from=recordFrom,
+        record_to=recordTo,
+        pick_day=day,
+        q=q,
+        tz=tz,
+        line=line,
+        area=area,
+        pc=pc,
+        merge=merge,
+        hide_unmatched=hideUnmatched,
+    )
+    data = export_table(
+        "台座原始数据",
+        ["台车", "台座名称", "序号", "识别工序", "产品线", "区域", "识别时间"],
+        rows,
+        [16, 18, 10, 22, 16, 18, 24],
+        wrap=True,
+    )
+    return _xlsx(data, f"{pid}-raw-records.xlsx")
 
 
 @router.get("/{pid}/raw/devices/{device_id}")

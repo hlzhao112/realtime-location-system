@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import LatestLocation, Project, RawReport
+from ..models import Epc, LatestLocation, Project, RawReport, Trolley
 from ..services.cache import get_cache, lookup_epc, lookup_reader
 from ..services.normalize import norm_epc, pretty_epc
 from ..services.project_svc import write_log
@@ -97,6 +97,50 @@ def extract_epcs(hex_data: str, epcs: list[str]) -> list[str]:
     return [compact]
 
 
+def should_write_raw(db: Session, project: Project, device_id: str, hex_data: str, when: datetime) -> bool:
+    """同一台车（读卡器）窗口内重复相同 MQTT Hex 不写入；换 Hex 则重新计时。"""
+    minutes = max(int(getattr(project, "hex_agg_min", 5) or 0), 0)
+    current = hex_data or ""
+    if minutes <= 0 or not current.strip():
+        return True
+    last = db.scalar(
+        select(RawReport)
+        .where(RawReport.project_id == project.id, RawReport.device_id == device_id)
+        .order_by(RawReport.ts.desc(), RawReport.id.desc())
+        .limit(1)
+    )
+    if not last:
+        return True
+    if (last.hex_data or "") != current:
+        return True
+    last_ts = last.ts
+    if last_ts is None:
+        return True
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.replace(tzinfo=timezone.utc)
+    return (when - last_ts).total_seconds() > minutes * 60
+
+
+def touch_report_meta(
+    db: Session,
+    project: Project,
+    trolley_id: int | None,
+    parsed_epcs: list[str],
+    hex_data: str,
+    when: datetime,
+) -> None:
+    if trolley_id:
+        row = db.get(Trolley, trolley_id)
+        if row:
+            row.last_report_time = when
+    norms = [norm_epc(e) for e in parsed_epcs if norm_epc(e)]
+    if not norms:
+        return
+    for epc_row in db.scalars(select(Epc).where(Epc.project_id == project.id, Epc.epc_norm.in_(norms))).all():
+        epc_row.last_read_time = when
+        epc_row.last_hex = hex_data or ""
+
+
 def apply_report(
     db: Session,
     project: Project,
@@ -124,18 +168,20 @@ def apply_report(
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
     parsed_epcs = extract_epcs(hex_data, epcs)
-
-    db.add(
-        RawReport(
-            project_id=project.id,
-            device_id=device_id,
-            hex_data=hex_data or " ".join(pretty_epc(x) for x in parsed_epcs),
-            epcs=parsed_epcs,
-            report_day=when.astimezone().strftime("%Y-%m-%d"),
-            test=test,
-            ts=when,
+    hex_store = hex_data or " ".join(pretty_epc(x) for x in parsed_epcs)
+    if should_write_raw(db, project, device_id, hex_store, when):
+        db.add(
+            RawReport(
+                project_id=project.id,
+                device_id=device_id,
+                hex_data=hex_store,
+                epcs=parsed_epcs,
+                report_day=when.astimezone().strftime("%Y-%m-%d"),
+                test=test,
+                ts=when,
+            )
         )
-    )
+    touch_report_meta(db, project, getattr(trolley, "id", None), parsed_epcs, hex_store, when)
 
     if not trolley:
         return {"ok": False, "reason": "unknown_device", "deviceId": device_id}

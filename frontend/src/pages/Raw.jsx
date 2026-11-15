@@ -112,7 +112,7 @@ function TagLines({ row }) {
       {tags.map((t, i) => (
         <div className="tagline" key={`${t.epc || "tag"}-${i}`}>
           {t.tagNo ? <span className="tagno mono">{t.tagNo}</span> : null}
-          {t.epc ? <span className="epc">{t.epc}</span> : null}
+          {t.epc ? <span className="epc epc-plain">{t.epc}</span> : null}
           <span>{placeText(t)}</span>
         </div>
       ))}
@@ -180,7 +180,7 @@ export default function Raw({ project, toast }) {
             </span>
           </div>
           <div className="tb-wrap" style={{ maxHeight: 360 }}>
-            <table className="tb">
+            <table className="tb raw-tb">
               <thead>
                 <tr>
                   <th className="num">序号</th>
@@ -190,7 +190,7 @@ export default function Raw({ project, toast }) {
                   <th>产线</th>
                   <th>工序</th>
                   <th>区域</th>
-                  <th>Hex 数据</th>
+                  <th className="hex-col">Hex 数据</th>
                 </tr>
               </thead>
               <tbody>
@@ -206,7 +206,7 @@ export default function Raw({ project, toast }) {
                         <div key={i}>{t.tagNo || "—"}</div>
                       )) : "—"}
                     </td>
-                    <td className="mono">
+                    <td className="mono epc-plain">
                       {tagRows(r).length ? tagRows(r).map((t, i) => (
                         <div key={i}>{t.epc || "—"}</div>
                       )) : "—"}
@@ -235,7 +235,7 @@ export default function Raw({ project, toast }) {
                         </div>
                       )) : "—"}
                     </td>
-                    <td className="mono">{r.hex}</td>
+                    <td className="mono hex-col">{r.hex}</td>
                   </tr>
                 ))}
               </tbody>
@@ -491,7 +491,7 @@ export default function Raw({ project, toast }) {
       ) : null}
       <div className="card pad0">
         <div className="tb-wrap" style={{ maxHeight: 840 }}>
-          <table className="tb">
+          <table className="tb raw-tb">
             <thead>
               <tr>
                 <th className="filterable">
@@ -512,6 +512,7 @@ export default function Raw({ project, toast }) {
                   <HeaderFilter value={colF.area} onChange={(v) => applyColF("area", v)} options={areaOpts} placeholder="全部区域" />
                 </th>
                 <th>识别时间</th>
+                <th className="hex-col">Hex</th>
               </tr>
             </thead>
             <tbody>
@@ -543,6 +544,7 @@ export default function Raw({ project, toast }) {
                       {r.time}
                       {r.test ? <span className="src-edited" style={{ marginLeft: 6 }}>测试</span> : null}
                     </td>
+                    <td className="mono hex-col">{r.hex || "—"}</td>
                   </tr>
                 );
               })}

@@ -52,7 +52,10 @@ function Basic({ p, setProject, toast, setModal, goMap }) {
     const values = {};
     fields.forEach((f) => {
       const el = document.getElementById("cf_" + f);
-      if (el) values[f] = el.type === "number" ? Number(el.value) : el.value;
+      if (!el) return;
+      if (el.type === "checkbox") values[f] = el.checked;
+      else if (el.type === "number") values[f] = Number(el.value);
+      else values[f] = el.value;
     });
     try {
       const next = await api.patchCfg(p.pid, group, values);
@@ -70,7 +73,14 @@ function Basic({ p, setProject, toast, setModal, goMap }) {
         <div className="grid g2">
           {fields.map((f) => (
             <Field key={f[0]} label={f[1]}>
-              <input className={"input" + (f[2] === "mono" ? " mono" : "")} id={"cf_" + f[0]} type={f[2] === "num" ? "number" : "text"} defaultValue={f[0] === "appSecret" ? "" : c[f[0]] ?? ""} disabled={f[0] === "pid"} />
+              {f[2] === "bool" ? (
+                <label className="row" style={{ gap: 8, marginTop: 6 }}>
+                  <input id={"cf_" + f[0]} type="checkbox" defaultChecked={c[f[0]] !== false} />
+                  启用
+                </label>
+              ) : (
+                <input className={"input" + (f[2] === "mono" ? " mono" : "")} id={"cf_" + f[0]} type={f[2] === "num" ? "number" : "text"} defaultValue={f[0] === "appSecret" ? "" : c[f[0]] ?? ""} disabled={f[0] === "pid"} />
+              )}
             </Field>
           ))}
         </div>
@@ -81,7 +91,7 @@ function Basic({ p, setProject, toast, setModal, goMap }) {
     <>
       <div className="row mb12 wrap">
         <button className="btn sm" onClick={() => edit("基本信息", "basic", [["pid", "PID", "mono"], ["name", "项目名称"]])}>基本信息</button>
-        <button className="btn sm" onClick={() => edit("采集参数", "collect", [["folder", "监控文件夹", "mono"], ["backup", "备份目录", "mono"], ["scan", "扫描间隔", "num"], ["stable", "稳定等待", "num"], ["offline", "离线判定", "num"], ["batch", "单批上限", "num"]])}>采集参数</button>
+        <button className="btn sm" onClick={() => edit("采集参数", "collect", [["folder", "监控文件夹", "mono"], ["backup", "备份目录", "mono"], ["scan", "扫描间隔", "num"], ["stable", "稳定等待", "num"], ["offline", "离线判定", "num"], ["batch", "单批上限", "num"], ["areaSingle", "一区域一台车", "bool"], ["rawKeepMonth", "原始保存月", "num"], ["pushKeepMonth", "推送保存月", "num"], ["hexAggMin", "Hex聚合分钟", "num"], ["inactiveDays", "异常标记天", "num"]])}>采集参数</button>
         <button className="btn sm" onClick={() => edit("推送与容错", "push", [["resendMax", "连续补发上限", "num"], ["keepSec", "保持推送间隔（秒）", "num"], ["retry", "重试次数", "num"], ["logClean", "日志清理天", "num"]])}>推送与容错</button>
         <button className="btn sm" onClick={() => edit("接口与鉴权", "api", [["appId", "AppID", "mono"], ["appSecret", "AppSecret"], ["tokenUrl", "Token URL", "mono"], ["pushUrl", "推送 URL", "mono"]])}>接口与鉴权</button>
         <button className="btn" onClick={async () => { try { const r = await api.testApi(p.pid); toast(r.detail, "连通测试"); } catch (e) { toast(e.message); } }}>测试接口连通</button>
@@ -97,7 +107,7 @@ function Basic({ p, setProject, toast, setModal, goMap }) {
       </div>
       <div className="card mb12">
         <div className="sec-h">采集参数</div>
-        <div className="grid g3">{kv("RFID 监控文件夹", c.folder, 1)}{kv("JSON 备份目录", c.backup, 1)}{kv("扫描间隔", c.scan + " 秒")}{kv("文件稳定等待", c.stable + " 秒")}{kv("离线判定", c.offline + " 小时")}{kv("单批台车上限", c.batch)}</div>
+        <div className="grid g3">{kv("RFID 监控文件夹", c.folder, 1)}{kv("JSON 备份目录", c.backup, 1)}{kv("扫描间隔", c.scan + " 秒")}{kv("文件稳定等待", c.stable + " 秒")}{kv("离线判定", c.offline + " 小时")}{kv("单批台车上限", c.batch)}{kv("区域占用", c.areaSingle === false ? "一区域可多台车" : "一区域一台车")}{kv("原始数据保存", (c.rawKeepMonth || 1) + " 个月")}{kv("推送数据保存", (c.pushKeepMonth || 1) + " 个月")}{kv("同车 Hex 聚合", (c.hexAggMin ?? 5) + " 分钟")}{kv("异常标记阈值", (c.inactiveDays || 30) + " 天")}</div>
       </div>
       <div className="card mb12">
         <div className="sec-h">推送与容错</div>

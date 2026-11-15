@@ -144,7 +144,11 @@ export const api = {
   },
   editPush: (pid, id, body) =>
     request(`/api/v1/projects/${pid}/pushes/${id}/edit`, { method: "POST", body: JSON.stringify(body) }),
-  batchPush: (pid) => request(`/api/v1/projects/${pid}/pushes/batch`, { method: "POST" }),
+  batchPush: (pid, body = {}) =>
+    request(`/api/v1/projects/${pid}/pushes/batch`, { method: "POST", body: JSON.stringify(body), timeoutMs: 120000 }),
+  assets: (pid) => request(`/api/v1/projects/${pid}/assets`),
+  exportAssetTrolleysUrl: (pid) => `/api/v1/projects/${pid}/assets/trolleys.xlsx`,
+  exportAssetTagsUrl: (pid) => `/api/v1/projects/${pid}/assets/tags.xlsx`,
   testStart: (pid) => request(`/api/v1/projects/${pid}/test/start`, { method: "POST" }),
   testStop: (pid) => request(`/api/v1/projects/${pid}/test/stop`, { method: "POST" }),
   testClear: (pid) => request(`/api/v1/projects/${pid}/test/clear`, { method: "POST" }),

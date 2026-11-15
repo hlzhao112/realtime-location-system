@@ -129,8 +129,12 @@ select.input{cursor:pointer}
 
 /* table */
 table.tb{width:100%;border-collapse:collapse;font-size:13px}
+table.tb.raw-tb{table-layout:fixed}
 .tb th{text-align:left;font-size:11px;color:var(--t3);text-transform:uppercase;letter-spacing:.4px;font-weight:600;padding:9px 10px;border-bottom:1px solid var(--line);background:var(--paper);position:sticky;top:0;z-index:1}
 .tb td{padding:9px 10px;border-bottom:1px solid var(--line);color:var(--t1);vertical-align:middle}
+.tb th.hex-col,.tb td.hex-col{width:20%;max-width:20%;word-break:break-all;overflow-wrap:anywhere;white-space:normal;letter-spacing:0}
+.epc-plain{word-break:break-all;overflow-wrap:anywhere;white-space:normal;letter-spacing:0}
+.asset-dim td{color:var(--t3)}
 .tb tr:hover td{background:var(--paper-alt)}
 .tb td.num,.tb th.num{text-align:right;font-variant-numeric:tabular-nums}
 .tb .acts{display:flex;gap:6px;justify-content:flex-end}

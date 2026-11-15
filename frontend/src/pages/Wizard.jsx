@@ -147,6 +147,20 @@ function Step1({ draft, setDraft }) {
           <Field label="文件稳定等待（秒）"><input className="input" type="number" value={c.stable} onChange={(e) => set("stable", e.target.value)} /></Field>
           <Field label="离线判定（小时）" hint="0.5 = 30 分钟无数据即离线"><input className="input" type="number" step="0.1" value={c.offline} onChange={(e) => set("offline", e.target.value)} /></Field>
           <Field label="单批台车上限"><input className="input" type="number" value={c.batch} onChange={(e) => set("batch", e.target.value)} /></Field>
+          <Field label="区域占用" hint="勾选后同一区域只允许一台车。新车进入会把旧车挤到同工序下一区域；中间工序末区域挤到下一工序第一区域；首/末工序末区域进入空闲。不勾选则一区域可多台车、不挤出">
+            <label className="row" style={{ gap: 8, marginTop: 6 }}>
+              <input type="checkbox" checked={c.areaSingle !== false} onChange={(e) => set("areaSingle", e.target.checked)} />
+              一个区域只能有一台车
+            </label>
+          </Field>
+          <Field label="原始数据保存（月）" hint="按自然月清理过期原始上报"><input className="input" type="number" min="1" value={c.rawKeepMonth ?? 1} onChange={(e) => set("rawKeepMonth", e.target.value)} /></Field>
+          <Field label="推送数据保存（月）" hint="按自然月清理过期推送记录"><input className="input" type="number" min="1" value={c.pushKeepMonth ?? 1} onChange={(e) => set("pushKeepMonth", e.target.value)} /></Field>
+          <Field label="同车相同 Hex 聚合（分钟）" hint="窗口内同一台车重复相同 Hex 不写入原始记录；换 Hex 则重新计时。默认 5 分钟">
+            <input className="input" type="number" min="0" value={c.hexAggMin ?? 5} onChange={(e) => set("hexAggMin", e.target.value)} />
+          </Field>
+          <Field label="未上报/未读取标记（天）" hint="超过该天数未上报或标签未读取则标记异常，默认 30 天">
+            <input className="input" type="number" min="1" value={c.inactiveDays ?? 30} onChange={(e) => set("inactiveDays", e.target.value)} />
+          </Field>
         </div>
       </div>
       <div className="fieldset">

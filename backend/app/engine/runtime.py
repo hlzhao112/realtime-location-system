@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from .customer import build_customer_payload, movement_status, post_customer, replace_identify_time, replace_sport_state
 from ..db import SessionLocal
-from ..models import LatestLocation, Line, Project, PushRecord, RawReport, SysLog, Trolley
+from ..models import Epc, LatestLocation, Line, Project, PushRecord, RawReport, SysLog, Trolley
 from ..services.normalize import norm_epc, pretty_epc
 from ..services.project_svc import load_project, write_log
 
@@ -385,6 +385,118 @@ def reissue_missing_procs(
     return done
 
 
+def area_single_on(project: Project) -> bool:
+    return bool(getattr(project, "area_single", True))
+
+
+def line_area_slots(line) -> list[tuple]:
+    """产线内区域的正向序列：工序上传顺序 × 区域内上传顺序。"""
+    slots = []
+    for proc in list(getattr(line, "procedures", None) or []):
+        for area in list(getattr(proc, "areas", None) or []):
+            slots.append((proc, area))
+    return slots
+
+
+def _slot_index(slots: list[tuple], proc_code: str, proc_name: str, area_code: str) -> int:
+    name = (proc_name or "").strip()
+    for i, (proc, area) in enumerate(slots):
+        if area.code == area_code and proc.code == proc_code and (not name or proc.name == name):
+            return i
+    for i, (proc, area) in enumerate(slots):
+        if area.code == area_code and proc.code == proc_code:
+            return i
+    return -1
+
+
+def _bump_area_reissue(area) -> None:
+    if area is None:
+        return
+    area.reissue_count = int(getattr(area, "reissue_count", 0) or 0) + 1
+
+
+def _place_loc_on_slot(loc: LatestLocation, line, proc, area) -> None:
+    loc.unassigned = False
+    loc.line_code = line.code
+    loc.line_name = line.name
+    loc.proc_code = proc.code
+    loc.proc_name = proc.name
+    loc.area_code = area.code
+    loc.area_name = area.name
+    loc.retry_proc = ""
+    update_seq_guard(loc, line, proc)
+
+
+def _proc_key(proc) -> tuple[str, str]:
+    return ((getattr(proc, "code", None) or ""), (getattr(proc, "name", None) or ""))
+
+
+def squeeze_forward(
+    db: Session,
+    project: Project,
+    line,
+    loc: LatestLocation,
+    trolley: Trolley,
+    vacated_area,
+    seen: set[int],
+    depth: int = 0,
+) -> None:
+    """被挤台车先挤到同工序下一区域；已是该工序末区域时：
+    首/末工序进入空闲，中间工序挤到下一工序第一区域。"""
+    if loc is None or trolley is None or trolley.id in seen or depth > 80:
+        return
+    seen.add(trolley.id)
+    _bump_area_reissue(vacated_area)
+    slots = line_area_slots(line)
+    idx = _slot_index(slots, loc.proc_code, loc.proc_name, loc.area_code)
+    procs = list(getattr(line, "procedures", None) or [])
+    nproc = narea = None
+    if 0 <= idx < len(slots):
+        cur_proc, _cur_area = slots[idx]
+        cur_key = _proc_key(cur_proc)
+        same_next = idx + 1 < len(slots) and _proc_key(slots[idx + 1][0]) == cur_key
+        first_key = _proc_key(procs[0]) if procs else ("", "")
+        last_key = _proc_key(procs[-1]) if procs else ("", "")
+        end_proc = cur_key == first_key or cur_key == last_key
+        if same_next:
+            nproc, narea = slots[idx + 1]
+        elif (not end_proc) and idx + 1 < len(slots):
+            nproc, narea = slots[idx + 1]
+    if nproc is None or narea is None:
+        mark_unassigned(loc, line, "", int(project.test_tick or 0))
+        loc.retry_proc = ""
+        write_log(
+            db,
+            project.id,
+            "信息",
+            f"区域独占：{trolley.tz} 被挤出至空闲位置（{loc.proc_name or loc.proc_code}）",
+        )
+        return
+    for other_loc, other_t in assigned_on(
+        db, project, line.code, nproc.code, narea.code, trolley.tz, nproc.name
+    ):
+        squeeze_forward(db, project, line, other_loc, other_t, narea, seen, depth + 1)
+    _place_loc_on_slot(loc, line, nproc, narea)
+    loc.identify_time = now_utc()
+    write_log(
+        db,
+        project.id,
+        "信息",
+        f"区域独占：{trolley.tz} 被挤到 {nproc.name}·{narea.code}",
+    )
+    create_push(
+        db,
+        project,
+        trolley,
+        loc,
+        loc.kind or "实时上报",
+        loc.source or "auto",
+        bool(loc.test),
+        loc.sport_state or "still",
+        loc.identify_time,
+    )
+
+
 def pick_free_on_line(db: Session, project: Project, line, except_tz: str, start_proc=None):
     """未分配台车只进入目标工序，不跳过中间工序；无空位则挤占该工序。"""
     procs = list(line.procedures) if line else []
@@ -497,20 +609,22 @@ def apply_deliver_result(db: Session, project: Project, rec: PushRecord, ok: boo
     return False, result
 
 
-def send_record(rec_id: int) -> bool:
+def send_record(rec_id: int, force: bool = False) -> bool:
     """在全局锁外请求客户接口，避免测试批量推送卡住页面上的单条推送。"""
     db = SessionLocal()
     try:
         with LOCK:
             rec = db.get(PushRecord, rec_id)
-            if not rec or rec.status not in {"pending", "failed"}:
+            if not rec:
+                return False
+            if not force and rec.status not in {"pending", "failed"}:
                 return False
             project = db.get(Project, rec.project_id)
             if not project:
                 return False
             snap = project_snap(project)
             payload = dict(rec.payload or {})
-            if rec.source != "manual" and not project.push_enabled:
+            if not force and rec.source != "manual" and not project.push_enabled:
                 rec.status = "pending"
                 db.commit()
                 return False
@@ -631,38 +745,18 @@ def create_push(
 def occupy_area(db: Session, project: Project, trolley: Trolley, loc: LatestLocation) -> None:
     if loc.unassigned or not loc.area_code or not loc.line_code:
         return
-    others = (
-        db.execute(
-            select(LatestLocation, Trolley)
-            .join(Trolley, Trolley.id == LatestLocation.trolley_id)
-            .where(
-                LatestLocation.project_id == project.id,
-                LatestLocation.unassigned.is_(False),
-                LatestLocation.line_code == loc.line_code,
-                LatestLocation.proc_code == loc.proc_code,
-                LatestLocation.proc_name == loc.proc_name,
-                LatestLocation.area_code == loc.area_code,
-                LatestLocation.trolley_id != trolley.id,
-            )
-        )
-        .all()
-    )
+    if not area_single_on(project):
+        return
     line = find_line(project, loc.line_code)
-    nxt_p = next_proc(line, loc.proc_code, loc.proc_name)
-    nxt = nxt_p.code if nxt_p else ""
-    nxt_name = nxt_p.name if nxt_p else ""
+    if not line:
+        return
+    vacated = resolve_area(project, loc.line_code, loc.proc_code, loc.area_code, loc.proc_name)
+    others = assigned_on(
+        db, project, loc.line_code, loc.proc_code, loc.area_code, trolley.tz, loc.proc_name
+    )
+    seen = {trolley.id}
     for other, ot in others:
-        other.unassigned = True
-        other.retry_proc = nxt
-        other.proc_code = nxt or other.proc_code
-        other.proc_name = nxt_name or other.proc_name
-        other.skip_tick = int(project.test_tick or 0)
-        write_log(
-            db,
-            project.id,
-            "信息",
-            f"区域独占冲突：{trolley.tz} 进入 {loc.proc_name}·{loc.area_code}，原台车 {ot.tz} 被挤出至「未分配」",
-        )
+        squeeze_forward(db, project, line, other, ot, vacated, seen)
 
 
 def apply_place(
@@ -705,17 +799,23 @@ def apply_place(
     db.flush()
     occupy_area(db, project, trolley, loc)
     if write_raw:
-        db.add(
-            RawReport(
-                project_id=project.id,
-                device_id=trolley.reader,
-                hex_data=hex_data or pretty_epc(epc),
-                epcs=[epc] if epc else [],
-                report_day=when.astimezone().strftime("%Y-%m-%d"),
-                test=test,
-                ts=when,
+        from .parse import should_write_raw, touch_report_meta
+
+        store = hex_data or pretty_epc(epc)
+        epcs = [epc] if epc else []
+        if should_write_raw(db, project, trolley.reader, store, when):
+            db.add(
+                RawReport(
+                    project_id=project.id,
+                    device_id=trolley.reader,
+                    hex_data=store,
+                    epcs=epcs,
+                    report_day=when.astimezone().strftime("%Y-%m-%d"),
+                    test=test,
+                    ts=when,
+                )
             )
-        )
+        touch_report_meta(db, project, trolley.id, epcs, store, when)
     if make_push:
         create_push(db, project, trolley, loc, kind, source, test, sport_state, when)
     return loc
@@ -770,7 +870,7 @@ def assigned_on(
 
 
 def pick_area(db: Session, project: Project, line, proc, except_tz: str):
-    """返回 (area, evict_loc_trolley_or_None)。无空闲时挤出停留最久者（与 demo 一致）。"""
+    """返回 (area, evict_loc_trolley_or_None)。单车模式无空闲时挤出停留最久者，由 occupy_area 正向级联。"""
     if not proc or not proc.areas:
         return None, None
     free = []
@@ -786,6 +886,8 @@ def pick_area(db: Session, project: Project, line, proc, except_tz: str):
         return random.choice(free), None
     if not occupied:
         return None, None
+    if not area_single_on(project):
+        return proc.areas[0], None
     occupied.sort(key=lambda x: -x[3])
     area, loc, t, _ = occupied[0]
     return area, (loc, t)
@@ -932,22 +1034,9 @@ def test_tick(db: Session, project: Project) -> None:
             area, evict = pick_area(db, project, line, proc, t.tz) if proc else (None, None)
         if not proc or not area:
             continue
+        if evict and not area_single_on(project):
+            evict = None
         if evict:
-            eloc, et = evict
-            nxt = next_proc(line, proc.code, proc.name)
-            mark_unassigned(
-                eloc,
-                line,
-                nxt.code if nxt else "",
-                tick,
-                retry_name=nxt.name if nxt else "",
-            )
-            write_log(
-                db,
-                project.id,
-                "信息",
-                f"区域独占冲突：{t.tz} 进入 {proc.name}·{area.code}，原台车 {et.tz} 被挤出至「未分配」（下一轮重试进入下一工序）",
-            )
             db.flush()
         loop = was_assigned and proc is procs[0] and len(procs) > 1
         epc = area_epc(area)
@@ -1203,6 +1292,20 @@ def batch_pending_ids(db: Session, project: Project) -> list[int]:
         .all()
     )
     return [r.id for r in rows]
+
+
+def batch_repush_ids(
+    db: Session,
+    project: Project,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> list[int]:
+    stmt = select(PushRecord.id).where(PushRecord.project_id == project.id)
+    if start:
+        stmt = stmt.where(PushRecord.identify_time >= start)
+    if end:
+        stmt = stmt.where(PushRecord.identify_time <= end)
+    return list(db.scalars(stmt.order_by(PushRecord.id.asc())).all())
 
 
 def batch_push(db: Session, project: Project) -> dict:
@@ -1640,6 +1743,7 @@ def raw_export_rows(
                 _raw_place_text(places, "line"),
                 _raw_place_text(places, "area"),
                 rec.get("time") or "",
+                rec.get("hex") or "",
             ]
         )
     return rows
@@ -1938,12 +2042,138 @@ def clear_logs(db: Session, project: Project) -> None:
     db.query(SysLog).filter(SysLog.project_id == project.id).delete()
 
 
+def add_calendar_months(dt: datetime, months: int) -> datetime:
+    y = dt.year
+    m = dt.month + months
+    while m > 12:
+        y += 1
+        m -= 12
+    while m < 1:
+        y -= 1
+        m += 12
+    leap = y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)
+    dim = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]
+    return dt.replace(year=y, month=m, day=min(dt.day, dim))
+
+
+_CLEAN_AT = 0.0
+
+
+def cleanup_retention(db: Session, project: Project) -> None:
+    now = now_utc()
+    raw_m = max(int(getattr(project, "raw_keep_month", 1) or 1), 1)
+    push_m = max(int(getattr(project, "push_keep_month", 1) or 1), 1)
+    raw_cut = add_calendar_months(now, -raw_m)
+    push_cut = add_calendar_months(now, -push_m)
+    db.query(RawReport).filter(RawReport.project_id == project.id, RawReport.ts < raw_cut).delete(
+        synchronize_session=False
+    )
+    db.query(PushRecord).filter(PushRecord.project_id == project.id, PushRecord.identify_time < push_cut).delete(
+        synchronize_session=False
+    )
+
+
+def maybe_cleanup_all(db: Session, projects: list[Project]) -> bool:
+    global _CLEAN_AT
+    import time as _time
+
+    now = _time.monotonic()
+    if now - _CLEAN_AT < 600:
+        return False
+    _CLEAN_AT = now
+    for project in projects:
+        try:
+            cleanup_retention(db, project)
+        except Exception:
+            continue
+    return True
+
+
+def asset_details(db: Session, project: Project) -> dict:
+    now = now_utc()
+    days = max(int(getattr(project, "inactive_days", 30) or 30), 1)
+    cutoff = now - timedelta(days=days)
+    locs = {
+        loc.trolley_id: loc
+        for loc in db.scalars(select(LatestLocation).where(LatestLocation.project_id == project.id)).all()
+    }
+
+    def stamp(dt: Optional[datetime], never: str) -> tuple[str, str]:
+        if not dt:
+            return never, "从未上报" if "上报" in never else "从未读取"
+        when = aware(dt)
+        text = fmt_local(when)
+        if when and when < cutoff:
+            return text, "可能存在异常"
+        return text, "正常"
+
+    trolleys = []
+    for t in project.trolleys:
+        loc = locs.get(t.id)
+        last = getattr(t, "last_report_time", None) or (loc.identify_time if loc else None)
+        last_text, status = stamp(last, "— / 从未上报")
+        trolleys.append(
+            {
+                "tz": t.tz,
+                "name": t.name,
+                "reader": t.reader,
+                "last": last_text,
+                "status": status,
+                "abnormal": status == "可能存在异常",
+                "never": status == "从未上报",
+            }
+        )
+    tags = []
+    for line in project.lines:
+        for proc in line.procedures:
+            for area in proc.areas:
+                for tag in area.tag_nos:
+                    epcs = list(tag.epcs or [])
+                    if not epcs:
+                        tags.append(
+                            {
+                                "tagNo": tag.no,
+                                "epc": "—",
+                                "line": f"{line.name}（{line.code}）",
+                                "proc": f"{proc.name}（{proc.code}）",
+                                "area": f"{area.name}（{area.code}）",
+                                "last": "— / 从未读取",
+                                "hex": "—",
+                                "status": "从未读取",
+                                "abnormal": False,
+                                "never": True,
+                            }
+                        )
+                        continue
+                    for epc in epcs:
+                        last_text, status = stamp(getattr(epc, "last_read_time", None), "— / 从未读取")
+                        if status == "从未上报":
+                            status = "从未读取"
+                        tags.append(
+                            {
+                                "tagNo": tag.no,
+                                "epc": epc.epc_raw or pretty_epc(epc.epc_norm),
+                                "line": f"{line.name}（{line.code}）",
+                                "proc": f"{proc.name}（{proc.code}）",
+                                "area": f"{area.name}（{area.code}）",
+                                "last": last_text,
+                                "hex": epc.last_hex or "—",
+                                "status": status,
+                                "abnormal": status == "可能存在异常",
+                                "never": status == "从未读取",
+                            }
+                        )
+    return {"trolleys": trolleys, "tags": tags, "inactiveDays": days}
+
+
 def tick_all(db: Session) -> bool:
     now = now_utc()
     t0 = now
     did = 0
     dirty = False
     rows = db.scalars(select(Project)).all()
+    if maybe_cleanup_all(db, rows):
+        dirty = True
     for stub in rows:
         due_adv = bool(stub.test_on and stub.test_next_adv and now >= aware(stub.test_next_adv))
         due_keep_test = bool(stub.test_on and stub.test_next_keep and now >= aware(stub.test_next_keep))

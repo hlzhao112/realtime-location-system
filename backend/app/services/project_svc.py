@@ -128,6 +128,11 @@ def to_out(db: Session, p: Project, ingest_once: str | None = None) -> ProjectOu
         retry=p.retry,
         logClean=p.log_clean,
         keepSec=int(p.keep_sec or 600),
+        areaSingle=bool(getattr(p, "area_single", True)),
+        rawKeepMonth=max(int(getattr(p, "raw_keep_month", 1) or 1), 1),
+        pushKeepMonth=max(int(getattr(p, "push_keep_month", 1) or 1), 1),
+        hexAggMin=max(int(getattr(p, "hex_agg_min", 5) or 0), 0),
+        inactiveDays=max(int(getattr(p, "inactive_days", 30) or 1), 1),
         appId=p.app_id,
         appSecret="••••••••" if p.app_secret else "",
         tokenUrl=p.token_url,
@@ -230,6 +235,11 @@ def apply_save(db: Session, p: Project, data) -> None:
     p.retry = data.retry
     p.log_clean = data.logClean
     p.keep_sec = max(int(getattr(data, "keepSec", None) or p.keep_sec or 600), 1)
+    p.area_single = bool(getattr(data, "areaSingle", True))
+    p.raw_keep_month = max(int(getattr(data, "rawKeepMonth", None) or p.raw_keep_month or 1), 1)
+    p.push_keep_month = max(int(getattr(data, "pushKeepMonth", None) or p.push_keep_month or 1), 1)
+    p.hex_agg_min = max(int(getattr(data, "hexAggMin", None) or 0), 0)
+    p.inactive_days = max(int(getattr(data, "inactiveDays", None) or p.inactive_days or 30), 1)
     if not p.test_on:
         from datetime import datetime, timedelta, timezone
         p.keep_next = datetime.now(timezone.utc) + timedelta(seconds=p.keep_sec)

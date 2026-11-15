@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -11,7 +11,7 @@ from ..deps import get_current_user
 from ..engine import runtime as rt
 from ..engine.customer import post_customer
 from ..models import User
-from ..schemas import PlaceIn, PushEditIn, RuntimePatchIn, TestSpeedIn
+from ..schemas import BatchPushIn, PlaceIn, PushEditIn, RuntimePatchIn, TestSpeedIn
 from ..services.excel_io import export_table
 from ..services.project_svc import load_project
 
@@ -46,6 +46,33 @@ def _xlsx(data: bytes, filename: str) -> Response:
 @router.get("/{pid}/board")
 def get_board(pid: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
     return rt.board_payload(db, _must(db, pid))
+
+
+@router.get("/{pid}/assets")
+def get_assets(pid: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
+    return rt.asset_details(db, _must(db, pid))
+
+
+@router.get("/{pid}/assets/trolleys.xlsx")
+def export_asset_trolleys(pid: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
+    data = rt.asset_details(db, _must(db, pid))
+    rows = [[r["tz"], r["name"], r["reader"], r["last"], r["status"]] for r in data["trolleys"]]
+    xls = export_table("台座列表", ["台车编号", "台座名称", "读卡器 ID", "最近上报时间", "状态"], rows, [16, 18, 16, 24, 16])
+    return _xlsx(xls, f"{pid}-trolleys.xlsx")
+
+
+@router.get("/{pid}/assets/tags.xlsx")
+def export_asset_tags(pid: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
+    data = rt.asset_details(db, _must(db, pid))
+    rows = [[r["tagNo"], r["epc"], r["line"], r["proc"], r["area"], r["last"], r["hex"], r["status"]] for r in data["tags"]]
+    xls = export_table(
+        "标签列表",
+        ["标签编号", "EPC", "产线", "工序", "区域", "最近读取时间", "Hex", "状态"],
+        rows,
+        [14, 28, 18, 18, 16, 24, 28, 16],
+        wrap=True,
+    )
+    return _xlsx(xls, f"{pid}-tags.xlsx")
 
 
 @router.patch("/{pid}/runtime")
@@ -302,22 +329,33 @@ def edit_push(pid: str, rid: int, body: PushEditIn, db: Session = Depends(get_db
 
 
 @router.post("/{pid}/pushes/batch")
-def batch_push(pid: str, db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
+def batch_push(pid: str, body: BatchPushIn = Body(default_factory=BatchPushIn), db: Session = Depends(get_db), _user: User = Depends(get_current_user)):
     p = _must(db, pid)
+    start_s = (body.startTime if body else "") or ""
+    end_s = (body.endTime if body else "") or ""
     try:
+        start, end = _push_filters(start_s, end_s)
         with rt.LOCK:
-            ids = rt.batch_pending_ids(db, p)
+            if start or end:
+                ids = rt.batch_repush_ids(db, p, start, end)
+                force = True
+            else:
+                ids = rt.batch_pending_ids(db, p)
+                force = False
             db.flush()
         ok = 0
         for rec_id in ids:
-            if rt.send_record(rec_id):
+            if rt.send_record(rec_id, force=force):
                 ok += 1
         with rt.LOCK:
             from ..services.project_svc import write_log
 
-            write_log(db, p.id, "成功" if ok == len(ids) else "信息", f"批量推送完成，成功 {ok}/{len(ids)} 台，来源:manual")
+            kind = "时间段重推" if force else "积压补推"
+            write_log(db, p.id, "成功" if ok == len(ids) else "信息", f"{kind}完成，成功 {ok}/{len(ids)} 条，来源:manual")
             db.flush()
         return {"ok": True, "success": ok, "total": len(ids)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, f"批量推送失败：{e}") from e
 
@@ -413,9 +451,9 @@ def export_raw(
     )
     data = export_table(
         "台座原始数据",
-        ["台车", "台座名称", "序号", "识别工序", "产品线", "区域", "识别时间"],
+        ["台车", "台座名称", "序号", "识别工序", "产品线", "区域", "识别时间", "Hex"],
         rows,
-        [16, 18, 10, 22, 16, 18, 24],
+        [16, 18, 10, 22, 16, 18, 24, 28],
         wrap=True,
     )
     return _xlsx(data, f"{pid}-raw-records.xlsx")

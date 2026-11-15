@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, downloadAuth } from "../api";
+import { formatStay } from "../helpers.jsx";
+import AssetDetails from "./AssetDetails.jsx";
 import { Modal } from "../ui";
 
 function srcKind(r) {
@@ -68,7 +70,8 @@ function TzCard({ t, list, onDragStart }) {
   const stale = !t.online;
   const mins = t.mins == null ? "—" : t.mins;
   const areaText = String(t.areaName || "").trim() || "-";
-  const tip = `最后上报 ${t.last || "—"} · 停留 ${mins} min${t.areaCode ? " · 区域 " + areaText : ""}${t.reissue ? " · 连续补发×" + t.reissue : ""} · 来源 ${t.src}`;
+  const stay = formatStay(mins);
+  const tip = `最后上报 ${t.last || "—"} · ${stale ? "停留" : "在线"} ${stay}${t.areaCode ? " · 区域 " + areaText : ""}${t.reissue ? " · 连续补发×" + t.reissue : ""} · 来源 ${t.src}`;
   return (
     <div
       className={"tz" + (stale ? " stale" : "") + (t.test ? " tmk" : "")}
@@ -86,7 +89,7 @@ function TzCard({ t, list, onDragStart }) {
       </div>
       <div className={"m" + (stale ? " warn" : "")}>
         {stale ? "停留 " : "在线 "}
-        {mins} min
+        {stay}
         {t.reissue ? ` · 补发×${t.reissue}` : ""}
         {t.src === "手动" ? " · 手动" : ""}
         {t.test ? <> · <span className="mk">测试</span></> : null}
@@ -108,6 +111,7 @@ export default function Board({ project, toast, startWizard }) {
   const [page, setPage] = useState(1);
   const [recTotal, setRecTotal] = useState(0);
   const [modal, setModal] = useState(null);
+  const [assetsOpen, setAssetsOpen] = useState(false);
   const [pushingId, setPushingId] = useState(null);
   const linesRef = useRef(null);
   const [linesH, setLinesH] = useState(null);
@@ -446,10 +450,32 @@ export default function Board({ project, toast, startWizard }) {
           <span className={"tag " + (board?.push ? "ok" : "err")}>{board?.push ? "● 自动推送运行中" : "● 自动推送已停止"}</span>
           <button className="btn sm" onClick={() => run(() => api.runtime(pid, { push: !board?.push }), board?.push ? "自动推送已停止，期间数据将积压待批量补推" : "自动推送已开启")}>{board?.push ? "停止推送" : "开启推送"}</button>
           <button className="btn sm" onClick={() => run(() => api.runtime(pid, { monitor: !board?.monitor }), board?.monitor ? "文件夹监测已停止" : "文件夹监测已启动")}>{board?.monitor ? "停止监测" : "启动监测"}</button>
-          <button className="btn sm" onClick={() => run(async () => {
-            const r = await api.batchPush(pid);
-            toast(`已补推积压数据：${r.success}/${r.total} 条`, "批量补推");
-          })}>手动批量推送</button>
+          <button className="btn sm" onClick={() => {
+            const now = new Date();
+            const pad = (n) => String(n).padStart(2, "0");
+            const local = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            const start = new Date(now.getTime() - 24 * 3600 * 1000);
+            setModal(
+              <Modal title="按时间段重推" onClose={() => setModal(null)}
+                foot={<><button className="btn" onClick={() => setModal(null)}>取消</button>
+                  <button className="btn primary" onClick={async () => {
+                    const fromEl = document.getElementById("batchFrom");
+                    const toEl = document.getElementById("batchTo");
+                    try {
+                      const r = await api.batchPush(pid, { startTime: fromEl?.value || "", endTime: toEl?.value || "" });
+                      setModal(null);
+                      await load();
+                      toast(`已重推 ${r.success}/${r.total} 条`, "时间段重推");
+                    } catch (e) { toast(e.message); }
+                  }}>开始重推</button></>}>
+                <div className="alert">将所选时间段内<strong>已生成的推送记录</strong>再向客户推送一次，不论当时是否已成功。</div>
+                <div className="grid g2">
+                  <div className="field"><label>开始时间</label><input className="input" id="batchFrom" type="datetime-local" defaultValue={local(start)} /></div>
+                  <div className="field"><label>结束时间</label><input className="input" id="batchTo" type="datetime-local" defaultValue={local(now)} /></div>
+                </div>
+              </Modal>
+            );
+          }}>手动批量推送</button>
           <button className={"btn sm " + (test.on ? "danger" : "primary")} onClick={() => {
             // #region agent log
             fetch("http://127.0.0.1:7259/ingest/42287c2f-2aca-4b5e-a241-93e737ef8f41", { method: "POST", headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "537a1e" }, body: JSON.stringify({ sessionId: "537a1e", runId: "post-fix", hypothesisId: "A,B", location: "Board.jsx:testBtn", message: "test-click", data: { turningOff: !!test.on, cursor: getComputedStyle(document.body).cursor }, timestamp: Date.now() }) }).catch(() => {});
@@ -477,11 +503,13 @@ export default function Board({ project, toast, startWizard }) {
           <span>台座推送 <b>{test.keepLabel}</b></span>
           <span>已推进 <b>{test.tick}</b> 轮</span>
           <span>测试记录 <b>{test.recs}</b> 条</span>
-          <span style={{ color: "var(--t3)" }}>规则：每台车从本产线第一道工序按序走到最后一道，不得跳过；走完回首工序；不跨产线；多区域随机选空闲区域；每区域仅一台车，被挤占者进「未分配」后仍按目标工序重入。测试台座每 10 分钟把当前位置推到客户接口。</span>
+          <span style={{ color: "var(--t3)" }}>规则：每台车从本产线第一道工序按序走到最后一道；单车模式下新车挤占会把旧车挤到同工序下一区域，中间工序末区域再挤到下一工序第一区域，首/末工序末区域进入空闲。多车模式不挤出。测试台座每 10 分钟把当前位置推到客户接口。</span>
         </div>
       ) : null}
 
-      {!lines.length ? (
+      {assetsOpen ? (
+        <AssetDetails pid={pid} toast={toast} onClose={() => setAssetsOpen(false)} />
+      ) : !lines.length ? (
         <>
           <div className="alert warn">本项目尚未完成映射表配置，实时监控无法渲染。请先完成<b>映射表</b>后再启用监测 / 推送。</div>
           <div className="row"><button className="btn primary" onClick={() => startWizard("edit", project, 2)}>去完成映射表</button></div>
@@ -559,7 +587,9 @@ export default function Board({ project, toast, startWizard }) {
             })}
           </div>
           <aside className="board-side" style={linesH ? { "--lines-h": `${linesH}px` } : undefined}>
-            <h4>台车列表 <span className="hint">· 可拖拽定位</span></h4>
+            <h4>台车列表 <span className="hint">· 可拖拽定位</span>
+              <button className="btn sm" style={{ marginLeft: 8 }} onClick={() => setAssetsOpen(true)}>详情</button>
+            </h4>
             <div className="tz-stats">
               <div className="tz-stat">
                 <div className="n">{stats.total}</div>
@@ -579,6 +609,7 @@ export default function Board({ project, toast, startWizard }) {
         </div>
       )}
 
+      {assetsOpen ? null : <>
       <div className="mt24">
         <div className="sec-h">推送记录（历史推送数据）</div>
         <p className="sec-t">发往客户接口的全量记录：查看报文、修改（来源→手动并触发推送）、单条 P2 推送、导出 Excel。</p>
@@ -661,6 +692,7 @@ export default function Board({ project, toast, startWizard }) {
           </div>
         ) : null}
       </div>
+      </>}
       {modal}
     </div>
   );

@@ -154,6 +154,11 @@ def copy_project(pid: str, body: CopyIn, db: Session = Depends(get_db)):
         retry=src.retry,
         log_clean=src.log_clean,
         keep_sec=src.keep_sec or 600,
+        area_single=bool(getattr(src, "area_single", True)),
+        raw_keep_month=int(getattr(src, "raw_keep_month", 1) or 1),
+        push_keep_month=int(getattr(src, "push_keep_month", 1) or 1),
+        hex_agg_min=int(getattr(src, "hex_agg_min", 5) or 5),
+        inactive_days=int(getattr(src, "inactive_days", 30) or 30),
         app_id="",
         app_secret="",
         token_url=src.token_url,
@@ -204,6 +209,11 @@ def patch_cfg(pid: str, body: CfgPatchIn, db: Session = Depends(get_db)):
         "retry": "retry",
         "logClean": "log_clean",
         "keepSec": "keep_sec",
+        "areaSingle": "area_single",
+        "rawKeepMonth": "raw_keep_month",
+        "pushKeepMonth": "push_keep_month",
+        "hexAggMin": "hex_agg_min",
+        "inactiveDays": "inactive_days",
         "appId": "app_id",
         "appSecret": "app_secret",
         "tokenUrl": "token_url",
@@ -223,6 +233,18 @@ def patch_cfg(pid: str, body: CfgPatchIn, db: Session = Depends(get_db)):
                 v = max(int(float(v or 600)), 1)
             except (TypeError, ValueError):
                 v = 600
+        if k == "areaSingle":
+            v = str(v).lower() in {"1", "true", "on", "yes"}
+        if k in {"rawKeepMonth", "pushKeepMonth", "inactiveDays"}:
+            try:
+                v = max(int(float(v or 1)), 1)
+            except (TypeError, ValueError):
+                v = 1
+        if k == "hexAggMin":
+            try:
+                v = max(int(float(v or 0)), 0)
+            except (TypeError, ValueError):
+                v = 5
         setattr(p, attr, v)
         n += 1
         if k == "name":

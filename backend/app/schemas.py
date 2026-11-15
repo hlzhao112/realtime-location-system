@@ -106,6 +106,11 @@ class CfgOut(BaseModel):
     retry: int = 3
     logClean: int = 30
     keepSec: int = 600
+    areaSingle: bool = True
+    rawKeepMonth: int = 1
+    pushKeepMonth: int = 1
+    hexAggMin: int = 5
+    inactiveDays: int = 30
     appId: str = ""
     appSecret: str = ""
     tokenUrl: str = ""
@@ -154,6 +159,11 @@ class ProjectSaveIn(BaseModel):
     retry: int = 3
     logClean: int = 30
     keepSec: int = 600
+    areaSingle: bool = True
+    rawKeepMonth: int = 1
+    pushKeepMonth: int = 1
+    hexAggMin: int = 5
+    inactiveDays: int = 30
     appId: str = ""
     appSecret: str = ""
     tokenUrl: str = ""
@@ -316,3 +326,8 @@ class TestSpeedIn(BaseModel):
 
     mode: Optional[str] = None
     fast: Optional[bool] = None
+
+
+class BatchPushIn(BaseModel):
+    startTime: str = ""
+    endTime: str = ""

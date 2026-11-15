@@ -45,6 +45,11 @@ class Project(Base):
     retry: Mapped[int] = mapped_column(Integer, default=3)
     log_clean: Mapped[int] = mapped_column(Integer, default=30)
     keep_sec: Mapped[int] = mapped_column(Integer, default=600)
+    area_single: Mapped[bool] = mapped_column(Boolean, default=True)
+    raw_keep_month: Mapped[int] = mapped_column(Integer, default=1)
+    push_keep_month: Mapped[int] = mapped_column(Integer, default=1)
+    hex_agg_min: Mapped[int] = mapped_column(Integer, default=5)
+    inactive_days: Mapped[int] = mapped_column(Integer, default=30)
     app_id: Mapped[str] = mapped_column(String(128), default="")
     app_secret: Mapped[str] = mapped_column(String(256), default="")
     token_url: Mapped[str] = mapped_column(String(512), default="")
@@ -157,6 +162,8 @@ class Epc(Base):
     tag_no_id: Mapped[int] = mapped_column(ForeignKey("tag_nos.id", ondelete="CASCADE"), index=True)
     epc_raw: Mapped[str] = mapped_column(String(128))
     epc_norm: Mapped[str] = mapped_column(String(128), index=True)
+    last_read_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_hex: Mapped[str] = mapped_column(Text, default="")
 
     project: Mapped[Project] = relationship(back_populates="epcs")
     tag_no_row: Mapped[TagNo] = relationship(back_populates="epcs")
@@ -174,6 +181,7 @@ class Trolley(Base):
     tz: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(128))
     reader: Mapped[str] = mapped_column(String(64), index=True)
+    last_report_time: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     project: Mapped[Project] = relationship(back_populates="trolleys")
     location: Mapped[Optional["LatestLocation"]] = relationship(

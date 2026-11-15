@@ -11,6 +11,11 @@ export const DEFAULT_CFG = {
   retry: 3,
   logClean: 30,
   keepSec: 600,
+  areaSingle: true,
+  rawKeepMonth: 1,
+  pushKeepMonth: 1,
+  hexAggMin: 5,
+  inactiveDays: 30,
   appId: "",
   appSecret: "",
   tokenUrl: "",
@@ -96,6 +101,29 @@ export function countEpcs(p) {
   );
   return n;
 }
+export function formatStay(mins) {
+  if (mins == null || mins === "—") return "—";
+  const n = Math.max(0, Number(mins));
+  if (!Number.isFinite(n) || n < 1) return "不足 1 分钟";
+  const year = 365 * 24 * 60;
+  const month = 30 * 24 * 60;
+  const day = 24 * 60;
+  const hour = 60;
+  let left = Math.floor(n);
+  const y = Math.floor(left / year); left %= year;
+  const mo = Math.floor(left / month); left %= month;
+  const d = Math.floor(left / day); left %= day;
+  const h = Math.floor(left / hour); left %= hour;
+  const m = left;
+  const parts = [];
+  if (y) parts.push(`${y} 年`);
+  if (mo) parts.push(`${mo} 个月`);
+  if (d) parts.push(`${d} 天`);
+  if (h) parts.push(`${h} 小时`);
+  if (m) parts.push(`${m} 分钟`);
+  return parts.join("") || "不足 1 分钟";
+}
+
 export function step1Done(p) {
   const c = p.cfg || {};
   return !!(c.pid && c.name && c.folder);
@@ -119,6 +147,11 @@ export function toSaveBody(p) {
     retry: Number(c.retry) || 3,
     logClean: Number(c.logClean) || 30,
     keepSec: Number(c.keepSec) || 600,
+    areaSingle: c.areaSingle !== false,
+    rawKeepMonth: Number(c.rawKeepMonth) || 1,
+    pushKeepMonth: Number(c.pushKeepMonth) || 1,
+    hexAggMin: Number(c.hexAggMin) || 0,
+    inactiveDays: Number(c.inactiveDays) || 30,
     appId: c.appId || "",
     appSecret: c.appSecret || "",
     tokenUrl: c.tokenUrl || "",

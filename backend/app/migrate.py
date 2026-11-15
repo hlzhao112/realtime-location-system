@@ -16,6 +16,11 @@ EXTRA = {
         ("test_next_keep", "TIMESTAMP"),
         ("keep_next", "TIMESTAMP"),
         ("keep_sec", "INTEGER DEFAULT 600"),
+        ("area_single", "BOOLEAN DEFAULT 1"),
+        ("raw_keep_month", "INTEGER DEFAULT 1"),
+        ("push_keep_month", "INTEGER DEFAULT 1"),
+        ("hex_agg_min", "INTEGER DEFAULT 5"),
+        ("inactive_days", "INTEGER DEFAULT 30"),
     ],
     "latest_locations": [
         ("kind", "VARCHAR(32) DEFAULT '实时上报'"),
@@ -42,6 +47,13 @@ EXTRA = {
         ("last_identify_time", "TIMESTAMP"),
         ("last_tz", "VARCHAR(64) DEFAULT ''"),
         ("reissue_count", "INTEGER DEFAULT 0"),
+    ],
+    "epcs": [
+        ("last_read_time", "TIMESTAMP"),
+        ("last_hex", "TEXT DEFAULT ''"),
+    ],
+    "trolleys": [
+        ("last_report_time", "TIMESTAMP"),
     ],
 }
 
